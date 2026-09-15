@@ -1,6 +1,6 @@
 """Tests for the cad-worker sandbox and helpers.
 
-Run with: see the Testing section of the README (test deps are installed
+Run with: see the Tests section of CONTRIBUTING.md (test deps are installed
 into the container tmpfs at run time; WORKER_SECRET must be unset).
 Or locally in the cadquery conda env: `pytest cad-worker/test_main.py`
 """
