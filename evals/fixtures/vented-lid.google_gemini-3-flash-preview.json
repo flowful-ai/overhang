@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "caseId": "vented-lid",
+  "model": "google/gemini-3-flash-preview",
+  "systemPromptSha256": "e552770ab7cc9b714b33439c2f3cf141302dfa4bf756fb320ba560e4cf5996dc",
+  "recordedAt": "2026-07-02T15:51:59.473Z",
+  "llmSteps": [
+    {
+      "text": "",
+      "toolCalls": [
+        {
+          "toolCallId": "tool_runCadquery_GKfOn6fOj9WY7iXDr5sN",
+          "toolName": "runCadquery",
+          "input": {
+            "code": "import cadquery as cq\n\n# PARAMETERS\nlid_w = 80.0      # mm\nlid_d = 50.0      # mm\nlid_t = 3.0       # mm\ncorner_r = 4.0    # mm\n\nslot_w = 2.0      # mm\nslot_l = 30.0     # mm\nslot_spacing = 5.0 # mm\nmargin = 10.0     # mm - distance from edges\n\n# Calculate number of slots\navailable_w = lid_w - 2 * margin\nnum_slots = int(available_w / slot_spacing)\n\n# Print orientation: Flat on the bed\nresult = (\n    cq.Workplane(\"XY\")\n    .box(lid_w, lid_d, lid_t, centered=(True, True, False))\n    .edges(\"|Z\").fillet(corner_r)\n    .faces(\">Z\").workplane()\n    .rarray(slot_spacing, 1, num_slots, 1)\n    .slot2D(slot_l, slot_w)\n    .cutThruAll()\n    .edges(\">Z\").chamfer(0.5) # Top edge chamfer for clean finish\n)\n"
+          }
+        }
+      ],
+      "finishReason": "tool-calls"
+    },
+    {
+      "text": "",
+      "toolCalls": [
+        {
+          "toolCallId": "tool_runCadquery_yutCKEGd6UyuUSOYMNOa",
+          "toolName": "runCadquery",
+          "input": {
+            "code": "import cadquery as cq\n\n# PARAMETERS\nlid_w = 80.0      # mm\nlid_d = 50.0      # mm\nlid_t = 3.0       # mm\ncorner_r = 4.0    # mm\n\nslot_w = 2.0      # mm\nslot_l = 30.0     # mm\nslot_spacing = 5.0 # mm\nmargin = 10.0     # mm - distance from edges\n\n# Calculate number of slots\navailable_w = lid_w - 2 * margin\nnum_slots = int(available_w / slot_spacing)\n\n# Print orientation: Flat on the bed\n# Using pushPoints instead of rarray to avoid potential zero-norm issues with 1D arrays\npositions = [(i * slot_spacing - (num_slots - 1) * slot_spacing / 2, 0) for i in range(num_slots)]\n\nresult = (\n    cq.Workplane(\"XY\")\n    .box(lid_w, lid_d, lid_t, centered=(True, True, False))\n    .edges(\"|Z\").fillet(corner_r)\n    .faces(\">Z\").workplane()\n    .pushPoints(positions)\n    .slot2D(slot_l, slot_w)\n    .cutThruAll()\n    .edges(\">Z\").chamfer(0.5)\n)\n"
+          }
+        }
+      ],
+      "finishReason": "tool-calls"
+    },
+    {
+      "text": "",
+      "toolCalls": [
+        {
+          "toolCallId": "tool_runCadquery_aeTpyya6uLyB6Qz0GXMs",
+          "toolName": "runCadquery",
+          "input": {
+            "code": "import cadquery as cq\n\n# PARAMETERS\nlid_w = 80.0      # mm\nlid_d = 50.0      # mm\nlid_t = 3.0       # mm\ncorner_r = 4.0    # mm\n\nslot_w = 2.0      # mm\nslot_l = 30.0     # mm\nslot_spacing = 5.0 # mm\nmargin = 10.0     # mm\n\n# Calculate number of slots and positions\navailable_w = lid_w - 2 * margin\nnum_slots = int(available_w / slot_spacing)\npositions = [(i * slot_spacing - (num_slots - 1) * slot_spacing / 2.0, 0) for i in range(num_slots)]\n\n# Geometry\nresult = (\n    cq.Workplane(\"XY\")\n    .box(lid_w, lid_d, lid_t, centered=(True, True, False))\n    .edges(\"|Z\").fillet(corner_r)\n    .faces(\">Z\").workplane()\n    .pushPoints(positions)\n    .slot2D(slot_l, slot_w)\n    .cutThruAll()\n    .edges(\">Z\").chamfer(0.5)\n)\n"
+          }
+        }
+      ],
+      "finishReason": "tool-calls"
+    },
+    {
+      "text": "",
+      "toolCalls": [
+        {
+          "toolCallId": "tool_runCadquery_LDDOiEGlch5ycW81wzhC",
+          "toolName": "runCadquery",
+          "input": {
+            "code": "import cadquery as cq\n\n# PARAMETERS\nLID_W = 80.0      # mm\nLID_D = 50.0      # mm\nLID_T = 3.0       # mm\nCORNER_R = 4.0    # mm\n\nSLOT_W = 2.0      # mm\nSLOT_L = 30.0     # mm\nSLOT_S = 5.0      # mm\nMARGIN = 10.0     # mm\n\n# Calculate number of slots and positions\n# Using uppercase to ensure no scope confusion\nnum_slots = int((LID_W - 2 * MARGIN) / SLOT_S)\npositions = []\nfor i in range(num_slots):\n    x_pos = i * SLOT_S - (num_slots - 1) * SLOT_S / 2.0\n    positions.append((x_pos, 0))\n\n# Geometry\nbase = (\n    cq.Workplane(\"XY\")\n    .box(LID_W, LID_D, LID_T, centered=(True, True, False))\n    .edges(\"|Z\").fillet(CORNER_R)\n)\n\nresult = (\n    base\n    .faces(\">Z\").workplane()\n    .pushPoints(positions)\n    .slot2D(SLOT_L, SLOT_W)\n    .cutThruAll()\n    .edges(\">Z\").chamfer(0.5)\n)\n"
+          }
+        }
+      ],
+      "finishReason": "tool-calls"
+    },
+    {
+      "text": "",
+      "toolCalls": [
+        {
+          "toolCallId": "tool_runCadquery_TECokrt2abRAl0Rr0HPP",
+          "toolName": "runCadquery",
+          "input": {
+            "code": "import cadquery as cq\n\n# PARAMETERS\nLID_W = 80.0      # mm\nLID_D = 50.0      # mm\nLID_T = 3.0       # mm\nCORNER_R = 4.0    # mm\n\nSLOT_W = 2.0      # mm\nSLOT_L = 30.0     # mm\nSLOT_S = 5.0      # mm\nMARGIN = 10.0     # mm\n\n# Calculate number of slots\nnum_slots = int((LID_W - 2 * MARGIN) / SLOT_S)\n\n# Geometry\n# We avoid slot2D and rarray/pushPoints on faces to bypass the gp_Dir2d error\n# Instead, we create a single slot and cut it using a loop or simple rects\nresult = (\n    cq.Workplane(\"XY\")\n    .box(LID_W, LID_D, LID_T, centered=(True, True, False))\n    .edges(\"|Z\").fillet(CORNER_R)\n)\n\n# Create slots by cutting rectangles with rounded ends manually or just slots\nfor i in range(num_slots):\n    x_pos = i * SLOT_S - (num_slots - 1) * SLOT_S / 2.0\n    # Create a slot-shaped cutter\n    cutter = (\n        cq.Workplane(\"XY\")\n        .workplane(offset=-1) # Start below\n        .center(x_pos, 0)\n        .slot2D(SLOT_L, SLOT_W)\n        .extrude(LID_T + 2)\n    )\n    result = result.cut(cutter)\n\n# Final touch\nresult = result.edges(\">Z\").chamfer(0.5)\n"
+          }
+        }
+      ],
+      "finishReason": "tool-calls"
+    }
+  ],
+  "workerCalls": [
+    {
+      "ok": false,
+      "code": "import cadquery as cq\n\n# PARAMETERS\nlid_w = 80.0      # mm\nlid_d = 50.0      # mm\nlid_t = 3.0       # mm\ncorner_r = 4.0    # mm\n\nslot_w = 2.0      # mm\nslot_l = 30.0     # mm\nslot_spacing = 5.0 # mm\nmargin = 10.0     # mm - distance from edges\n\n# Calculate number of slots\navailable_w = lid_w - 2 * margin\nnum_slots = int(available_w / slot_spacing)\n\n# Print orientation: Flat on the bed\nresult = (\n    cq.Workplane(\"XY\")\n    .box(lid_w, lid_d, lid_t, centered=(True, True, False))\n    .edges(\"|Z\").fillet(corner_r)\n    .faces(\">Z\").workplane()\n    .rarray(slot_spacing, 1, num_slots, 1)\n    .slot2D(slot_l, slot_w)\n    .cutThruAll()\n    .edges(\">Z\").chamfer(0.5) # Top edge chamfer for clean finish\n)\n",
+      "error": "CAD Rendering Failed: Line 26 of your script: Standard_ConstructionError: gp_Dir2d() - input vector has zero norm"
+    },
+    {
+      "ok": false,
+      "code": "import cadquery as cq\n\n# PARAMETERS\nlid_w = 80.0      # mm\nlid_d = 50.0      # mm\nlid_t = 3.0       # mm\ncorner_r = 4.0    # mm\n\nslot_w = 2.0      # mm\nslot_l = 30.0     # mm\nslot_spacing = 5.0 # mm\nmargin = 10.0     # mm - distance from edges\n\n# Calculate number of slots\navailable_w = lid_w - 2 * margin\nnum_slots = int(available_w / slot_spacing)\n\n# Print orientation: Flat on the bed\n# Using pushPoints instead of rarray to avoid potential zero-norm issues with 1D arrays\npositions = [(i * slot_spacing - (num_slots - 1) * slot_spacing / 2, 0) for i in range(num_slots)]\n\nresult = (\n    cq.Workplane(\"XY\")\n    .box(lid_w, lid_d, lid_t, centered=(True, True, False))\n    .edges(\"|Z\").fillet(corner_r)\n    .faces(\">Z\").workplane()\n    .pushPoints(positions)\n    .slot2D(slot_l, slot_w)\n    .cutThruAll()\n    .edges(\">Z\").chamfer(0.5)\n)\n",
+      "error": "CAD Rendering Failed: Line 20 of your script: NameError: name 'slot_spacing' is not defined"
+    },
+    {
+      "ok": false,
+      "code": "import cadquery as cq\n\n# PARAMETERS\nlid_w = 80.0      # mm\nlid_d = 50.0      # mm\nlid_t = 3.0       # mm\ncorner_r = 4.0    # mm\n\nslot_w = 2.0      # mm\nslot_l = 30.0     # mm\nslot_spacing = 5.0 # mm\nmargin = 10.0     # mm\n\n# Calculate number of slots and positions\navailable_w = lid_w - 2 * margin\nnum_slots = int(available_w / slot_spacing)\npositions = [(i * slot_spacing - (num_slots - 1) * slot_spacing / 2.0, 0) for i in range(num_slots)]\n\n# Geometry\nresult = (\n    cq.Workplane(\"XY\")\n    .box(lid_w, lid_d, lid_t, centered=(True, True, False))\n    .edges(\"|Z\").fillet(corner_r)\n    .faces(\">Z\").workplane()\n    .pushPoints(positions)\n    .slot2D(slot_l, slot_w)\n    .cutThruAll()\n    .edges(\">Z\").chamfer(0.5)\n)\n",
+      "error": "CAD Rendering Failed: Line 17 of your script: NameError: name 'slot_spacing' is not defined"
+    },
+    {
+      "ok": false,
+      "code": "import cadquery as cq\n\n# PARAMETERS\nLID_W = 80.0      # mm\nLID_D = 50.0      # mm\nLID_T = 3.0       # mm\nCORNER_R = 4.0    # mm\n\nSLOT_W = 2.0      # mm\nSLOT_L = 30.0     # mm\nSLOT_S = 5.0      # mm\nMARGIN = 10.0     # mm\n\n# Calculate number of slots and positions\n# Using uppercase to ensure no scope confusion\nnum_slots = int((LID_W - 2 * MARGIN) / SLOT_S)\npositions = []\nfor i in range(num_slots):\n    x_pos = i * SLOT_S - (num_slots - 1) * SLOT_S / 2.0\n    positions.append((x_pos, 0))\n\n# Geometry\nbase = (\n    cq.Workplane(\"XY\")\n    .box(LID_W, LID_D, LID_T, centered=(True, True, False))\n    .edges(\"|Z\").fillet(CORNER_R)\n)\n\nresult = (\n    base\n    .faces(\">Z\").workplane()\n    .pushPoints(positions)\n    .slot2D(SLOT_L, SLOT_W)\n    .cutThruAll()\n    .edges(\">Z\").chamfer(0.5)\n)\n",
+      "error": "CAD Rendering Failed: Line 34 of your script: Standard_ConstructionError: gp_Dir2d() - input vector has zero norm"
+    },
+    {
+      "ok": true,
+      "code": "import cadquery as cq\n\n# PARAMETERS\nLID_W = 80.0      # mm\nLID_D = 50.0      # mm\nLID_T = 3.0       # mm\nCORNER_R = 4.0    # mm\n\nSLOT_W = 2.0      # mm\nSLOT_L = 30.0     # mm\nSLOT_S = 5.0      # mm\nMARGIN = 10.0     # mm\n\n# Calculate number of slots\nnum_slots = int((LID_W - 2 * MARGIN) / SLOT_S)\n\n# Geometry\n# We avoid slot2D and rarray/pushPoints on faces to bypass the gp_Dir2d error\n# Instead, we create a single slot and cut it using a loop or simple rects\nresult = (\n    cq.Workplane(\"XY\")\n    .box(LID_W, LID_D, LID_T, centered=(True, True, False))\n    .edges(\"|Z\").fillet(CORNER_R)\n)\n\n# Create slots by cutting rectangles with rounded ends manually or just slots\nfor i in range(num_slots):\n    x_pos = i * SLOT_S - (num_slots - 1) * SLOT_S / 2.0\n    # Create a slot-shaped cutter\n    cutter = (\n        cq.Workplane(\"XY\")\n        .workplane(offset=-1) # Start below\n        .center(x_pos, 0)\n        .slot2D(SLOT_L, SLOT_W)\n        .extrude(LID_T + 2)\n    )\n    result = result.cut(cutter)\n\n# Final touch\nresult = result.edges(\">Z\").chamfer(0.5)\n",
+      "response": {
+        "stl_base64": "",
+        "metrics": {
+          "bbox": {
+            "x": 80,
+            "y": 24,
+            "z": 3
+          },
+          "volume": 11427.95
+        },
+        "warnings": [
+          "Overhang warning: 14% of faces exceed 45 degrees and may need supports."
+        ],
+        "console_output": null
+      }
+    }
+  ],
+  "score": {
+    "rendered": true,
+    "watertight": true,
+    "bboxOk": false,
+    "warningsCount": 1,
+    "pass": false
+  },
+  "metrics": {
+    "stepsUsed": 5,
+    "inputTokens": 29341,
+    "outputTokens": 1720,
+    "costUsd": 0.0198305,
+    "durationMs": 15101
+  }
+}

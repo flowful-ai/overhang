@@ -1,0 +1,186 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# PRs share one group per ref, so a new push cancels the superseded run. Pushes
+# to main get a group per commit: a shared group would keep only one pending
+# run and silently drop the rest, even with cancel-in-progress false.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  frontend:
+    name: Frontend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: "npm"
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm test
+
+  worker:
+    name: CAD worker tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: cad-worker
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install OCP system deps
+        run: sudo apt-get update && sudo apt-get install -y libosmesa6 libgl1 libglu1-mesa
+      # Cache the conda package tarballs. Env resolution still runs but package
+      # downloads (CadQuery + OCP are ~500MB) are reused across runs.
+      - name: Restore conda package cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/conda_pkgs_dir
+          key: conda-pkgs-${{ runner.os }}-${{ hashFiles('cad-worker/Dockerfile') }}
+          restore-keys: |
+            conda-pkgs-${{ runner.os }}-
+      # Python and CadQuery pins must match cad-worker/Dockerfile.
+      - uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5 # v4.0.1
+        with:
+          python-version: "3.12"
+          auto-activate: false
+          activate-environment: cadquery
+          channels: conda-forge
+          conda-remove-defaults: "true"
+          use-only-tar-bz2: false
+      - name: Install CadQuery + deps
+        shell: bash -l {0}
+        run: |
+          conda install --override-channels -c conda-forge python=3.12 cadquery=2.8.0 -y
+          pip install --no-cache-dir -r requirements.txt -r requirements-dev.txt
+          python -c "import cadquery, numpy, OCP; print('cadquery', cadquery.__version__, 'numpy', numpy.__version__)"
+      - name: Lint (ruff)
+        shell: bash -l {0}
+        run: ruff check .
+      - name: Run pytest
+        shell: bash -l {0}
+        run: pytest
+
+  # Exercise cad-worker/Dockerfile so a broken conda/pip layer fails CI instead
+  # of the next deploy.
+  worker-image:
+    name: CAD worker image build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build cad-worker image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: cad-worker
+          load: true
+          tags: overhang-cad-worker
+          cache-from: type=gha,scope=cad-worker
+          cache-to: type=gha,mode=max,scope=cad-worker
+      - name: Smoke-test imports in the image
+        run: docker run --rm overhang-cad-worker python -c "import cadquery, fastapi, trimesh, main; print('cadquery', cadquery.__version__)"
+
+  npm-audit:
+    name: npm audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      # Dev dependencies are included: they run in CI and in the image build.
+      - run: npm audit --audit-level=high
+
+  # Best-effort: pip-audit resolves the requirement files in a fresh venv, so
+  # unpinned transitive deps float to their latest versions and the conda set
+  # shipped in the worker image (cadquery, OCP, numpy build) is not audited.
+  pip-audit:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit==2.10.1
+      # cadquery comes from conda and is not covered here.
+      - run: pip-audit -r cad-worker/requirements.txt -r cad-worker/requirements-dev.txt
+
+  # Regression test for the install path: a production image booted with only
+  # the env setup.sh writes (OpenRouter key, worker secret) must come up and
+  # serve /api/health.
+  docker-boot:
+    name: Docker boot
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Guard the compose contract: it must resolve with only the secrets
+      # setup.sh writes (no Postgres service left to demand a password), and
+      # both the new MAX_CONCURRENT_* and the pre-rename ANON_MAX_CONCURRENT_*
+      # vars must reach the frontend raw, since the app decides precedence
+      # between them. JSON output + jq is scoped to the frontend service and
+      # immune to compose's YAML quoting/indent choices.
+      - name: Assert compose needs no database and forwards both concurrency var names
+        env:
+          WORKER_SECRET: dummy-worker-secret
+          OPENROUTER_API_KEY: dummy-key
+          MAX_CONCURRENT_GENERATIONS: abc
+          ANON_MAX_CONCURRENT_GENERATIONS: "7"
+          MAX_CONCURRENT_RENDERS: "3"
+        run: >-
+          docker compose config --format json | jq -e '
+          (.services | has("postgres") | not)
+          and .services.frontend.environment.MAX_CONCURRENT_GENERATIONS == "abc"
+          and .services.frontend.environment.ANON_MAX_CONCURRENT_GENERATIONS == "7"
+          and .services.frontend.environment.MAX_CONCURRENT_RENDERS == "3"
+          and .services.frontend.environment.ANON_MAX_CONCURRENT_RENDERS == ""'
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build frontend image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          load: true
+          tags: overhang-frontend
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+      - name: Boot the production image
+        run: |
+          docker run -d --name frontend -p 3000:3000 \
+            -e OPENROUTER_API_KEY=dummy-key \
+            -e WORKER_SECRET=dummy-worker-secret \
+            overhang-frontend
+      # Explicit poll loop rather than curl --retry: retries EVERY non-200
+      # response (curl only retries its transient set, so a stray 3xx/404
+      # mid-boot would fail instantly) and requires exactly 200 at the end.
+      - name: Wait for /api/health (must be 200)
+        run: |
+          for i in $(seq 1 30); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/api/health || true)"
+            if [ "$code" = "200" ]; then
+              echo "GET /api/health -> 200 after $i attempt(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "GET /api/health never returned 200 (last: $code)"
+          exit 1
+      - name: Show frontend logs
+        if: failure()
+        run: docker logs frontend || true

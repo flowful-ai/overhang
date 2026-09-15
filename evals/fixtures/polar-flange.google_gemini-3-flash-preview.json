@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "caseId": "polar-flange",
+  "model": "google/gemini-3-flash-preview",
+  "systemPromptSha256": "e552770ab7cc9b714b33439c2f3cf141302dfa4bf756fb320ba560e4cf5996dc",
+  "recordedAt": "2026-07-02T15:52:23.402Z",
+  "llmSteps": [
+    {
+      "text": "",
+      "toolCalls": [
+        {
+          "toolCallId": "tool_runCadquery_CUTTl4PCFRgQzZB84j16",
+          "toolName": "runCadquery",
+          "input": {
+            "code": "import cadquery as cq\n\n# PARAMETERS\nflange_d = 60.0       # mm - flange outer diameter\nflange_t = 6.0        # mm - flange thickness\nbolt_circle_d = 45.0  # mm - bolt circle diameter\nbolt_hole_d = 4.5     # mm - M4 clearance hole (standard 4.5mm for M4)\nbolt_count = 6\ncenter_bore_d = 10.0  # mm - optional center bore for utility\n\n# Print orientation: Flat on the bed\nresult = (\n    cq.Workplane(\"XY\")\n    .circle(flange_d / 2)\n    .extrude(flange_t)\n    .faces(\">Z\")\n    .workplane()\n    # Add a center bore\n    .hole(center_bore_d)\n    # Create the bolt hole pattern\n    .faces(\">Z\")\n    .workplane()\n    .polarArray(bolt_circle_d / 2, 0, 360, bolt_count)\n    .hole(bolt_hole_d)\n    # Add a small chamfer to the top and bottom edges for printability/feel\n    .edges(\">Z or <Z\")\n    .chamfer(0.5)\n)\n"
+          }
+        }
+      ],
+      "finishReason": "tool-calls"
+    },
+    {
+      "text": "This is a 60mm diameter round flange, 6mm thick, featuring a 6-hole polar array for M4 screws (4.5mm clearance) on a 45mm bolt circle. I have also included a 10mm center bore and 0.5mm chamfers on the top and bottom edges for a cleaner finish and easier printing.\n\n**Key Dimensions:**\n- **Outer Diameter:** 60mm\n- **Thickness:** 6mm\n- **Bolt Circle:** 45mm diameter (6x 4.5mm holes)\n- **Center Bore:** 10mm diameter\n- **Print Orientation:** Flat on the build plate (XY plane).",
+      "toolCalls": [],
+      "finishReason": "stop"
+    }
+  ],
+  "workerCalls": [
+    {
+      "ok": true,
+      "code": "import cadquery as cq\n\n# PARAMETERS\nflange_d = 60.0       # mm - flange outer diameter\nflange_t = 6.0        # mm - flange thickness\nbolt_circle_d = 45.0  # mm - bolt circle diameter\nbolt_hole_d = 4.5     # mm - M4 clearance hole (standard 4.5mm for M4)\nbolt_count = 6\ncenter_bore_d = 10.0  # mm - optional center bore for utility\n\n# Print orientation: Flat on the bed\nresult = (\n    cq.Workplane(\"XY\")\n    .circle(flange_d / 2)\n    .extrude(flange_t)\n    .faces(\">Z\")\n    .workplane()\n    # Add a center bore\n    .hole(center_bore_d)\n    # Create the bolt hole pattern\n    .faces(\">Z\")\n    .workplane()\n    .polarArray(bolt_circle_d / 2, 0, 360, bolt_count)\n    .hole(bolt_hole_d)\n    # Add a small chamfer to the top and bottom edges for printability/feel\n    .edges(\">Z or <Z\")\n    .chamfer(0.5)\n)\n",
+      "response": {
+        "stl_base64": "",
+        "metrics": {
+          "bbox": {
+            "x": 60,
+            "y": 60,
+            "z": 6
+          },
+          "volume": 15843.05
+        },
+        "warnings": [
+          "Overhang warning: 13% of faces exceed 45 degrees and may need supports."
+        ],
+        "console_output": null
+      }
+    }
+  ],
+  "score": {
+    "rendered": true,
+    "watertight": true,
+    "bboxOk": true,
+    "warningsCount": 1,
+    "pass": true
+  },
+  "metrics": {
+    "stepsUsed": 2,
+    "inputTokens": 9861,
+    "outputTokens": 460,
+    "costUsd": 0.0063105,
+    "durationMs": 4831
+  }
+}

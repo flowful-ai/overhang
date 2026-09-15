@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "caseId": "polar-flange",
+  "model": "deepseek/deepseek-v4-flash",
+  "systemPromptSha256": "e552770ab7cc9b714b33439c2f3cf141302dfa4bf756fb320ba560e4cf5996dc",
+  "recordedAt": "2026-07-02T16:08:36.078Z",
+  "llmSteps": [
+    {
+      "text": "",
+      "toolCalls": [
+        {
+          "toolCallId": "call_70f3e0c8c1394bc2b0bc051f",
+          "toolName": "runCadquery",
+          "input": {
+            "code": "import cadquery as cq\n\n# PARAMETERS\nflange_d = 60.0       # mm - outer diameter\nflange_t = 6.0        # mm - flange thickness\nbolt_circle_d = 45.0  # mm - bolt circle diameter\nbolt_hole_d = 4.3     # mm - M4 clearance hole\nbolt_count = 6\n\n# Print orientation: flat face down on the bed\nresult = (\n    cq.Workplane(\"XY\")\n    .circle(flange_d / 2)\n    .extrude(flange_t)\n    .faces(\">Z\")\n    .workplane()\n    .polarArray(bolt_circle_d / 2, 0, 360, bolt_count)\n    .hole(bolt_hole_d)\n)"
+          }
+        }
+      ],
+      "finishReason": "tool-calls"
+    },
+    {
+      "text": "Here's your round flange:\n\n- **60mm diameter** × **6mm thick** disc, printed flat on the bed.\n- **6× M4 clearance holes** (4.3mm diameter) evenly spaced on a **45mm bolt circle** (60° apart via polar array).\n\nThe overhang warning is just the vertical cylindrical wall — that's normal for a disc printed flat and doesn't require supports. The part is ready for 3D printing.",
+      "toolCalls": [],
+      "finishReason": "stop"
+    }
+  ],
+  "workerCalls": [
+    {
+      "ok": true,
+      "code": "import cadquery as cq\n\n# PARAMETERS\nflange_d = 60.0       # mm - outer diameter\nflange_t = 6.0        # mm - flange thickness\nbolt_circle_d = 45.0  # mm - bolt circle diameter\nbolt_hole_d = 4.3     # mm - M4 clearance hole\nbolt_count = 6\n\n# Print orientation: flat face down on the bed\nresult = (\n    cq.Workplane(\"XY\")\n    .circle(flange_d / 2)\n    .extrude(flange_t)\n    .faces(\">Z\")\n    .workplane()\n    .polarArray(bolt_circle_d / 2, 0, 360, bolt_count)\n    .hole(bolt_hole_d)\n)",
+      "response": {
+        "stl_base64": "",
+        "metrics": {
+          "bbox": {
+            "x": 60,
+            "y": 60,
+            "z": 6
+          },
+          "volume": 16441.81
+        },
+        "warnings": [
+          "Overhang warning: 25% of faces exceed 45 degrees and may need supports."
+        ],
+        "console_output": null
+      }
+    }
+  ],
+  "score": {
+    "rendered": true,
+    "watertight": true,
+    "bboxOk": true,
+    "warningsCount": 1,
+    "pass": true
+  },
+  "metrics": {
+    "stepsUsed": 2,
+    "inputTokens": 9974,
+    "outputTokens": 642,
+    "costUsd": 0.000414388,
+    "durationMs": 11739
+  }
+}

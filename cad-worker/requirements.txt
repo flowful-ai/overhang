@@ -1,0 +1,10 @@
+fastapi==0.141.1
+uvicorn==0.53.0
+# cadquery is installed via conda in the Dockerfile, not pip
+pydantic==2.13.5
+trimesh==4.12.2
+# numpy is owned by the conda solve (cadquery/OCP binaries are built against
+# it); a range keeps pip from replacing it with an ABI-incompatible version.
+numpy>=1.24,<3
+# Fixes missing 'zoom' module required by CadQuery's DXF export
+ezdxf==1.4.4

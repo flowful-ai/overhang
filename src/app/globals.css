@@ -1,0 +1,96 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Class-based dark mode (toggled by next-themes on <html>). Only the /app
+   workspace ships dark: variants. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* Overhang brand: orange (Tailwind orange scale). The app uses primary-*;
+     --accent in :root below is the same orange. */
+  --color-primary-50: #fff7ed;
+  --color-primary-100: #ffedd5;
+  --color-primary-200: #fed7aa;
+  --color-primary-300: #fdba74;
+  --color-primary-400: #fb923c;
+  --color-primary-500: #f97316;
+  --color-primary-600: #ea580c;
+  --color-primary-700: #c2410c;
+  --color-primary-800: #9a3412;
+  --color-primary-900: #7c2d12;
+  --color-primary-950: #431407;
+}
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+
+  --bg: #0A0F1A;
+  --bg-elevated: #0E1422;
+  --bg-card: #111827;
+  --fg: #F4F6FB;
+  --fg-muted: #A2B0C4;
+  --fg-subtle: #7C8BA1;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --accent: #F97316;
+  --accent-hover: #EA580C;
+  --accent-soft: rgba(249, 115, 22, 0.12);
+}
+
+/* Dark mode only flips the body background/foreground so there's no light flash
+   at the edges / overscroll behind the app. The fixed palette tokens in :root
+   (--bg, --fg, --accent, ...) are not changed here. Keep this block after :root
+   so it wins on equal specificity. */
+.dark {
+  --background: #0b0f17;
+  --foreground: #f3f4f6;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}
+
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+@keyframes drift {
+  0%   { transform: translate3d(-8%, -4%, 0) scale(1); }
+  50%  { transform: translate3d(8%, 4%, 0) scale(1.08); }
+  100% { transform: translate3d(-8%, -4%, 0) scale(1); }
+}
+
+.bg-drift {
+  animation: drift 20s ease-in-out infinite;
+  will-change: transform;
+}
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.fade-up {
+  animation: fade-up 500ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bg-drift,
+  .fade-up {
+    animation: none;
+  }
+}

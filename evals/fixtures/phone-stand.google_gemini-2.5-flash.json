@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "caseId": "phone-stand",
+  "model": "google/gemini-2.5-flash",
+  "systemPromptSha256": "3bafd9d4807738c1c29e94abc8ecff07487d557104b07d02c44039af10dc85e4",
+  "recordedAt": "2026-07-02T12:24:24.086Z",
+  "llmSteps": [
+    {
+      "text": "",
+      "toolCalls": [],
+      "finishReason": "other"
+    }
+  ],
+  "workerCalls": [],
+  "score": {
+    "rendered": false,
+    "watertight": false,
+    "bboxOk": false,
+    "warningsCount": 0,
+    "pass": false
+  },
+  "metrics": {
+    "stepsUsed": 1,
+    "inputTokens": null,
+    "outputTokens": null,
+    "costUsd": null,
+    "durationMs": 3266
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "caseId": "pi5-enclosure",
+  "model": "google/gemini-3-flash-preview",
+  "systemPromptSha256": "e552770ab7cc9b714b33439c2f3cf141302dfa4bf756fb320ba560e4cf5996dc",
+  "recordedAt": "2026-07-02T15:50:51.044Z",
+  "llmSteps": [
+    {
+      "text": "",
+      "toolCalls": [
+        {
+          "toolCallId": "tool_runCadquery_yiCOCPCdpu9CMpVXr25I",
+          "toolName": "runCadquery",
+          "input": {
+            "code": "import cadquery as cq\n\n# PARAMETERS - Raspberry Pi 5 Enclosure\n# RPi 5 PCB: 85 x 56 mm\npcb_w = 85.0\npcb_d = 56.0\npcb_t = 1.4\ncorner_r = 3.0\n\n# Enclosure Dims\nwall = 3.0\nfloor_t = 2.0\nclearance = 1.5  # Internal clearance around PCB\ninner_w = pcb_w + 2 * clearance\ninner_d = pcb_d + 2 * clearance\ninner_h = 25.0   # Height for HATs/Cooling\n\nouter_w = inner_w + 2 * wall\nouter_d = inner_d + 2 * wall\nouter_h = inner_h + floor_t\n\n# Mounting Bosses (M2.5 screws)\nboss_d = 6.0\nboss_h = 4.0     # Standoff height\nhole_d = 2.4     # For M2.5 self-tapping\n# Hole pattern: 58mm x 49mm (centered on PCB)\nhole_x = 58.0\nhole_y = 49.0\n\n# USB-C Cutout (approximate position for RPi 5)\n# RPi 5 USB-C is on the long side (bottom-left-ish)\nusbc_w = 12.0\nusbc_h = 6.0\nusbc_x_offset = -pcb_w/2 + 15.0 # Distance from left edge to center of port\n\n# 1. Main Body (Hollow Box)\nouter = (\n    cq.Workplane(\"XY\")\n    .box(outer_w, outer_d, outer_h, centered=(True, True, False))\n    .edges(\"|Z\").fillet(corner_r + wall)\n)\n\ninner = (\n    cq.Workplane(\"XY\")\n    .workplane(offset=floor_t)\n    .box(inner_w, inner_d, outer_h, centered=(True, True, False))\n    .edges(\"|Z\").fillet(corner_r)\n)\n\nbody = outer.cut(inner)\n\n# 2. Mounting Bosses\nboss_pts = [\n    (hole_x/2, hole_y/2),\n    (-hole_x/2, hole_y/2),\n    (hole_x/2, -hole_y/2),\n    (-hole_x/2, -hole_y/2)\n]\n\nbody = (\n    body.faces(\"<Z\").workplane(offset=floor_t, invert=True)\n    .pushPoints(boss_pts)\n    .circle(boss_d/2).extrude(boss_h)\n    .faces(\"<Z\").workplane(offset=floor_t, invert=True)\n    .pushPoints(boss_pts)\n    .hole(hole_d)\n)\n\n# 3. USB-C Cutout\n# Positioned on the \"front\" long wall (negative Y)\nbody = (\n    body.faces(\"<Y\").workplane()\n    .center(usbc_x_offset, floor_t + boss_h + pcb_t + usbc_h/2 - outer_d/2)\n    .rect(usbc_w, usbc_h)\n    .cutThruAll()\n)\n\n# 4. Ventilation (Simple slots on the bottom)\nbody = (\n    body.faces(\"<Z\").workplane()\n    .rect(inner_w - 20, inner_d - 20, forConstruction=True)\n    .pushPoints([(-15, 0), (0, 0), (15, 0)])\n    .slot2D(inner_d - 20, 4.0, 90)\n    .cutThruAll()\n)\n\nresult = body\n"
+          }
+        }
+      ],
+      "finishReason": "tool-calls"
+    },
+    {
+      "text": "This is a robust enclosure for the Raspberry Pi 5, featuring 3mm thick walls and integrated mounting hardware.\n\n### Key Features:\n- **Dimensions**: 94 x 65 x 27 mm (outer).\n- **Mounting**: Includes four 4mm tall internal standoffs with 2.4mm holes, designed for M2.5 self-tapping screws in the standard 58x49mm RPi pattern.\n- **USB-C Access**: A 12x6mm cutout is positioned on the long side to accommodate the power input.\n- **Thermal Management**: Three large ventilation slots are cut into the floor to allow for airflow under the PCB.\n- **Printability**: Designed with a flat bottom for easy printing. Note that the USB-C cutout and the top rim may require minimal supports depending on your printer's bridging capabilities.\n\nThe internal height of 25mm provides ample clearance for the official RPi 5 Active Cooler or low-profile HATs.",
+      "toolCalls": [],
+      "finishReason": "stop"
+    }
+  ],
+  "workerCalls": [
+    {
+      "ok": true,
+      "code": "import cadquery as cq\n\n# PARAMETERS - Raspberry Pi 5 Enclosure\n# RPi 5 PCB: 85 x 56 mm\npcb_w = 85.0\npcb_d = 56.0\npcb_t = 1.4\ncorner_r = 3.0\n\n# Enclosure Dims\nwall = 3.0\nfloor_t = 2.0\nclearance = 1.5  # Internal clearance around PCB\ninner_w = pcb_w + 2 * clearance\ninner_d = pcb_d + 2 * clearance\ninner_h = 25.0   # Height for HATs/Cooling\n\nouter_w = inner_w + 2 * wall\nouter_d = inner_d + 2 * wall\nouter_h = inner_h + floor_t\n\n# Mounting Bosses (M2.5 screws)\nboss_d = 6.0\nboss_h = 4.0     # Standoff height\nhole_d = 2.4     # For M2.5 self-tapping\n# Hole pattern: 58mm x 49mm (centered on PCB)\nhole_x = 58.0\nhole_y = 49.0\n\n# USB-C Cutout (approximate position for RPi 5)\n# RPi 5 USB-C is on the long side (bottom-left-ish)\nusbc_w = 12.0\nusbc_h = 6.0\nusbc_x_offset = -pcb_w/2 + 15.0 # Distance from left edge to center of port\n\n# 1. Main Body (Hollow Box)\nouter = (\n    cq.Workplane(\"XY\")\n    .box(outer_w, outer_d, outer_h, centered=(True, True, False))\n    .edges(\"|Z\").fillet(corner_r + wall)\n)\n\ninner = (\n    cq.Workplane(\"XY\")\n    .workplane(offset=floor_t)\n    .box(inner_w, inner_d, outer_h, centered=(True, True, False))\n    .edges(\"|Z\").fillet(corner_r)\n)\n\nbody = outer.cut(inner)\n\n# 2. Mounting Bosses\nboss_pts = [\n    (hole_x/2, hole_y/2),\n    (-hole_x/2, hole_y/2),\n    (hole_x/2, -hole_y/2),\n    (-hole_x/2, -hole_y/2)\n]\n\nbody = (\n    body.faces(\"<Z\").workplane(offset=floor_t, invert=True)\n    .pushPoints(boss_pts)\n    .circle(boss_d/2).extrude(boss_h)\n    .faces(\"<Z\").workplane(offset=floor_t, invert=True)\n    .pushPoints(boss_pts)\n    .hole(hole_d)\n)\n\n# 3. USB-C Cutout\n# Positioned on the \"front\" long wall (negative Y)\nbody = (\n    body.faces(\"<Y\").workplane()\n    .center(usbc_x_offset, floor_t + boss_h + pcb_t + usbc_h/2 - outer_d/2)\n    .rect(usbc_w, usbc_h)\n    .cutThruAll()\n)\n\n# 4. Ventilation (Simple slots on the bottom)\nbody = (\n    body.faces(\"<Z\").workplane()\n    .rect(inner_w - 20, inner_d - 20, forConstruction=True)\n    .pushPoints([(-15, 0), (0, 0), (15, 0)])\n    .slot2D(inner_d - 20, 4.0, 90)\n    .cutThruAll()\n)\n\nresult = body\n",
+      "response": {
+        "stl_base64": "",
+        "metrics": {
+          "bbox": {
+            "x": 94,
+            "y": 65,
+            "z": 27
+          },
+          "volume": 33318.8
+        },
+        "warnings": [
+          "Overhang warning: 23% of faces exceed 45 degrees and may need supports."
+        ],
+        "console_output": null
+      }
+    }
+  ],
+  "score": {
+    "rendered": true,
+    "watertight": true,
+    "bboxOk": true,
+    "warningsCount": 1,
+    "pass": true
+  },
+  "metrics": {
+    "stepsUsed": 2,
+    "inputTokens": 11070,
+    "outputTokens": 1142,
+    "costUsd": 0.008961,
+    "durationMs": 9358
+  }
+}

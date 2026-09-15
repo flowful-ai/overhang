@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "caseId": "phone-stand",
+  "model": "deepseek/deepseek-v4-flash",
+  "systemPromptSha256": "e552770ab7cc9b714b33439c2f3cf141302dfa4bf756fb320ba560e4cf5996dc",
+  "recordedAt": "2026-07-02T15:47:24.221Z",
+  "llmSteps": [
+    {
+      "text": "",
+      "toolCalls": [],
+      "finishReason": "length"
+    }
+  ],
+  "workerCalls": [],
+  "score": {
+    "rendered": false,
+    "watertight": false,
+    "bboxOk": false,
+    "warningsCount": 0,
+    "pass": false
+  },
+  "metrics": {
+    "stepsUsed": 1,
+    "inputTokens": 4583,
+    "outputTokens": 8000,
+    "costUsd": 0.002017134,
+    "durationMs": 86067
+  }
+}

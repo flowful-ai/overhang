@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "caseId": "cable-clip",
+  "model": "anthropic/claude-sonnet-5",
+  "systemPromptSha256": "e552770ab7cc9b714b33439c2f3cf141302dfa4bf756fb320ba560e4cf5996dc",
+  "recordedAt": "2026-07-02T15:57:31.201Z",
+  "llmSteps": [
+    {
+      "text": "",
+      "toolCalls": [
+        {
+          "toolCallId": "toolu_01HC7EQa9o1xidhWwWnWfvxC",
+          "toolName": "runCadquery",
+          "input": {
+            "code": "import cadquery as cq\nimport math\n\n# PARAMETERS\ncable_d   = 6.0    # mm - cable diameter to hold\nclearance = 0.4    # mm - snap clearance around cable\nwall_t    = 2.5    # mm - clip ring wall thickness\nclip_width= 8.0    # mm - width of clip along cable axis (Y)\ngap_deg   = 100.0  # mm(deg) - opening angle of the C gap, centered at top\nplate_t   = 3.0    # mm - mounting plate thickness\ntab_len   = 8.0    # mm - extra tab length beyond ring on each side\nscrew_d   = 4.3    # mm - M4 clearance hole\noverlap   = 1.5    # mm - how much ring sinks into plate for solid union\n\ninner_r = cable_d/2 + clearance/2\nouter_r = inner_r + wall_t\nring_center_z = plate_t + outer_r - overlap\n\nplate_w = 2*outer_r + 2*tab_len\n\n# Ring (C-clip) built in XZ plane, extruded along Y\nring_outer = (\n    cq.Workplane(\"XZ\").center(0, ring_center_z)\n    .circle(outer_r).extrude(clip_width/2, both=True)\n)\nring_inner = (\n    cq.Workplane(\"XZ\").center(0, ring_center_z)\n    .circle(inner_r).extrude(clip_width/2, both=True)\n)\nring = ring_outer.cut(ring_inner)\n\n# Wedge to cut the opening gap at the top of the ring\nhalf_gap = math.radians(gap_deg/2)\ntheta1 = math.pi/2 - half_gap\ntheta2 = math.pi/2 + half_gap\nr_cut = outer_r + 1.0\nwedge = (\n    cq.Workplane(\"XZ\").center(0, ring_center_z)\n    .moveTo(0, 0)\n    .lineTo(r_cut*math.cos(theta1), r_cut*math.sin(theta1))\n    .lineTo(r_cut*math.cos(theta2), r_cut*math.sin(theta2))\n    .close()\n    .extrude(clip_width/2 + 1.0, both=True)\n)\nring = ring.cut(wedge)\n\n# Mounting plate\nplate = cq.Workplane(\"XY\").box(plate_w, clip_width, plate_t, centered=(True, True, False))\n\nbody = plate.union(ring)\n\n# Screw holes in the two tabs\nhole_x = outer_r + tab_len/2\nhole1 = cq.Workplane(\"XY\").center(hole_x, 0).circle(screw_d/2).extrude(plate_t + 1.0)\nhole2 = cq.Workplane(\"XY\").center(-hole_x, 0).circle(screw_d/2).extrude(plate_t + 1.0)\n\nresult = body.cut(hole1).cut(hole2).edges(\"|Z\").fillet(1.0)\n"
+          }
+        }
+      ],
+      "finishReason": "tool-calls"
+    },
+    {
+      "text": "Made a wall-mount cable clip for a 6mm cable: a C-shaped ring (open at top, ~100° gap for snap-in insertion) with 0.4mm clearance around the cable, sitting on a flat mounting plate with two M4 clearance holes for screws. Overall size is 27.4 x 8 x 10.9mm. The ring's curved top does create some overhang (~17% of faces), which is normal for a C-clip printed flat on its plate and typically prints fine without supports at this small scale, but you could rotate 90° (print with the plate vertical) if you want a fully support-free print.",
+      "toolCalls": [],
+      "finishReason": "stop"
+    }
+  ],
+  "workerCalls": [
+    {
+      "ok": true,
+      "code": "import cadquery as cq\nimport math\n\n# PARAMETERS\ncable_d   = 6.0    # mm - cable diameter to hold\nclearance = 0.4    # mm - snap clearance around cable\nwall_t    = 2.5    # mm - clip ring wall thickness\nclip_width= 8.0    # mm - width of clip along cable axis (Y)\ngap_deg   = 100.0  # mm(deg) - opening angle of the C gap, centered at top\nplate_t   = 3.0    # mm - mounting plate thickness\ntab_len   = 8.0    # mm - extra tab length beyond ring on each side\nscrew_d   = 4.3    # mm - M4 clearance hole\noverlap   = 1.5    # mm - how much ring sinks into plate for solid union\n\ninner_r = cable_d/2 + clearance/2\nouter_r = inner_r + wall_t\nring_center_z = plate_t + outer_r - overlap\n\nplate_w = 2*outer_r + 2*tab_len\n\n# Ring (C-clip) built in XZ plane, extruded along Y\nring_outer = (\n    cq.Workplane(\"XZ\").center(0, ring_center_z)\n    .circle(outer_r).extrude(clip_width/2, both=True)\n)\nring_inner = (\n    cq.Workplane(\"XZ\").center(0, ring_center_z)\n    .circle(inner_r).extrude(clip_width/2, both=True)\n)\nring = ring_outer.cut(ring_inner)\n\n# Wedge to cut the opening gap at the top of the ring\nhalf_gap = math.radians(gap_deg/2)\ntheta1 = math.pi/2 - half_gap\ntheta2 = math.pi/2 + half_gap\nr_cut = outer_r + 1.0\nwedge = (\n    cq.Workplane(\"XZ\").center(0, ring_center_z)\n    .moveTo(0, 0)\n    .lineTo(r_cut*math.cos(theta1), r_cut*math.sin(theta1))\n    .lineTo(r_cut*math.cos(theta2), r_cut*math.sin(theta2))\n    .close()\n    .extrude(clip_width/2 + 1.0, both=True)\n)\nring = ring.cut(wedge)\n\n# Mounting plate\nplate = cq.Workplane(\"XY\").box(plate_w, clip_width, plate_t, centered=(True, True, False))\n\nbody = plate.union(ring)\n\n# Screw holes in the two tabs\nhole_x = outer_r + tab_len/2\nhole1 = cq.Workplane(\"XY\").center(hole_x, 0).circle(screw_d/2).extrude(plate_t + 1.0)\nhole2 = cq.Workplane(\"XY\").center(-hole_x, 0).circle(screw_d/2).extrude(plate_t + 1.0)\n\nresult = body.cut(hole1).cut(hole2).edges(\"|Z\").fillet(1.0)\n",
+      "response": {
+        "stl_base64": "",
+        "metrics": {
+          "bbox": {
+            "x": 27.4,
+            "y": 8,
+            "z": 10.86
+          },
+          "volume": 965.29
+        },
+        "warnings": [
+          "Overhang warning: 17% of faces exceed 45 degrees and may need supports."
+        ],
+        "console_output": null
+      }
+    }
+  ],
+  "score": {
+    "rendered": true,
+    "watertight": true,
+    "bboxOk": true,
+    "warningsCount": 1,
+    "pass": true
+  },
+  "metrics": {
+    "stepsUsed": 2,
+    "inputTokens": 15611,
+    "outputTokens": 6869,
+    "costUsd": 0.099912,
+    "durationMs": 80047
+  }
+}

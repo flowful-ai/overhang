@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "caseId": "vented-lid",
+  "model": "anthropic/claude-sonnet-5",
+  "systemPromptSha256": "e552770ab7cc9b714b33439c2f3cf141302dfa4bf756fb320ba560e4cf5996dc",
+  "recordedAt": "2026-07-02T15:58:00.710Z",
+  "llmSteps": [
+    {
+      "text": "",
+      "toolCalls": [
+        {
+          "toolCallId": "toolu_01NmGwzFfxqT6QzEPyzXi9yr",
+          "toolName": "runCadquery",
+          "input": {
+            "code": "import cadquery as cq\n\n# PARAMETERS\nlid_w = 80.0     # mm - lid width\nlid_d = 50.0     # mm - lid depth\nlid_t = 3.0      # mm - lid thickness\ncorner_r = 3.0   # mm - corner fillet radius\n\nslot_l = 12.0    # mm - slot length\nslot_w = 2.0     # mm - slot width\nspacing_x = 8.0  # mm - slot spacing X\nspacing_y = 6.0  # mm - slot spacing Y\nmargin = 10.0    # mm - keep-out margin from edges\n\n# Build ventilation slot grid, centered\ncols = int((lid_w - 2 * margin) / spacing_x) + 1\nrows = int((lid_d - 2 * margin) / spacing_y) + 1\npositions = [\n    (x * spacing_x - (cols - 1) * spacing_x / 2, y * spacing_y - (rows - 1) * spacing_y / 2)\n    for x in range(cols) for y in range(rows)\n]\n\nresult = (\n    cq.Workplane(\"XY\")\n    .box(lid_w, lid_d, lid_t, centered=(True, True, False))\n    .edges(\"|Z\").fillet(corner_r)\n    .faces(\">Z\").workplane()\n    .pushPoints(positions)\n    .slot2D(slot_l, slot_w).cutThruAll()\n)\n"
+          }
+        }
+      ],
+      "finishReason": "tool-calls"
+    },
+    {
+      "text": "",
+      "toolCalls": [
+        {
+          "toolCallId": "toolu_01EdBx9uD8YkBZXN9SMUtUTg",
+          "toolName": "runCadquery",
+          "input": {
+            "code": "import cadquery as cq\n\n# PARAMETERS\nlid_w = 80.0     # mm - lid width\nlid_d = 50.0     # mm - lid depth\nlid_t = 3.0      # mm - lid thickness\ncorner_r = 3.0   # mm - corner fillet radius\n\nslot_l = 12.0    # mm - slot length\nslot_w = 2.0     # mm - slot width\nspacing_x = 8.0  # mm - slot spacing X\nspacing_y = 6.0  # mm - slot spacing Y\nmargin = 10.0    # mm - keep-out margin from edges\n\n# Build ventilation slot grid, centered\ncols = int((lid_w - 2 * margin) / spacing_x) + 1\nrows = int((lid_d - 2 * margin) / spacing_y) + 1\n\npositions = []\nfor x in range(cols):\n    for y in range(rows):\n        px = x * spacing_x - (cols - 1) * spacing_x / 2\n        py = y * spacing_y - (rows - 1) * spacing_y / 2\n        positions.append((px, py))\n\nresult = (\n    cq.Workplane(\"XY\")\n    .box(lid_w, lid_d, lid_t, centered=(True, True, False))\n    .edges(\"|Z\").fillet(corner_r)\n    .faces(\">Z\").workplane()\n    .pushPoints(positions)\n    .slot2D(slot_l, slot_w).cutThruAll()\n)\n"
+          }
+        }
+      ],
+      "finishReason": "tool-calls"
+    },
+    {
+      "text": "Made a flat 80x50x3mm lid with rounded corners (3mm fillet) and a grid of vertical slot vents (12x2mm) spaced across the surface with a 10mm keep-out margin from the edges. The overhang warning is just from the through-cut slot edges and fillets — negligible for a thin flat part printed flat on the bed, so no supports needed.",
+      "toolCalls": [],
+      "finishReason": "stop"
+    }
+  ],
+  "workerCalls": [
+    {
+      "ok": false,
+      "code": "import cadquery as cq\n\n# PARAMETERS\nlid_w = 80.0     # mm - lid width\nlid_d = 50.0     # mm - lid depth\nlid_t = 3.0      # mm - lid thickness\ncorner_r = 3.0   # mm - corner fillet radius\n\nslot_l = 12.0    # mm - slot length\nslot_w = 2.0     # mm - slot width\nspacing_x = 8.0  # mm - slot spacing X\nspacing_y = 6.0  # mm - slot spacing Y\nmargin = 10.0    # mm - keep-out margin from edges\n\n# Build ventilation slot grid, centered\ncols = int((lid_w - 2 * margin) / spacing_x) + 1\nrows = int((lid_d - 2 * margin) / spacing_y) + 1\npositions = [\n    (x * spacing_x - (cols - 1) * spacing_x / 2, y * spacing_y - (rows - 1) * spacing_y / 2)\n    for x in range(cols) for y in range(rows)\n]\n\nresult = (\n    cq.Workplane(\"XY\")\n    .box(lid_w, lid_d, lid_t, centered=(True, True, False))\n    .edges(\"|Z\").fillet(corner_r)\n    .faces(\">Z\").workplane()\n    .pushPoints(positions)\n    .slot2D(slot_l, slot_w).cutThruAll()\n)\n",
+      "error": "CAD Rendering Failed: Line 20 of your script: NameError: name 'rows' is not defined"
+    },
+    {
+      "ok": true,
+      "code": "import cadquery as cq\n\n# PARAMETERS\nlid_w = 80.0     # mm - lid width\nlid_d = 50.0     # mm - lid depth\nlid_t = 3.0      # mm - lid thickness\ncorner_r = 3.0   # mm - corner fillet radius\n\nslot_l = 12.0    # mm - slot length\nslot_w = 2.0     # mm - slot width\nspacing_x = 8.0  # mm - slot spacing X\nspacing_y = 6.0  # mm - slot spacing Y\nmargin = 10.0    # mm - keep-out margin from edges\n\n# Build ventilation slot grid, centered\ncols = int((lid_w - 2 * margin) / spacing_x) + 1\nrows = int((lid_d - 2 * margin) / spacing_y) + 1\n\npositions = []\nfor x in range(cols):\n    for y in range(rows):\n        px = x * spacing_x - (cols - 1) * spacing_x / 2\n        py = y * spacing_y - (rows - 1) * spacing_y / 2\n        positions.append((px, py))\n\nresult = (\n    cq.Workplane(\"XY\")\n    .box(lid_w, lid_d, lid_t, centered=(True, True, False))\n    .edges(\"|Z\").fillet(corner_r)\n    .faces(\">Z\").workplane()\n    .pushPoints(positions)\n    .slot2D(slot_l, slot_w).cutThruAll()\n)\n",
+      "response": {
+        "stl_base64": "",
+        "metrics": {
+          "bbox": {
+            "x": 80,
+            "y": 50,
+            "z": 3
+          },
+          "volume": 9544.27
+        },
+        "warnings": [
+          "Overhang warning: 25% of faces exceed 45 degrees and may need supports."
+        ],
+        "console_output": null
+      }
+    }
+  ],
+  "score": {
+    "rendered": true,
+    "watertight": true,
+    "bboxOk": true,
+    "warningsCount": 1,
+    "pass": true
+  },
+  "metrics": {
+    "stepsUsed": 3,
+    "inputTokens": 23406,
+    "outputTokens": 1819,
+    "costUsd": 0.065002,
+    "durationMs": 29505
+  }
+}

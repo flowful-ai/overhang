@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "caseId": "snap-fit-box",
+  "model": "anthropic/claude-sonnet-5",
+  "systemPromptSha256": "e552770ab7cc9b714b33439c2f3cf141302dfa4bf756fb320ba560e4cf5996dc",
+  "recordedAt": "2026-07-02T15:59:51.055Z",
+  "llmSteps": [
+    {
+      "text": "",
+      "toolCalls": [
+        {
+          "toolCallId": "toolu_01KG9tEnVreKsSRuFgX11zYx",
+          "toolName": "runCadquery",
+          "input": {
+            "code": "import cadquery as cq\n# PARAMETERS\nbox_w = 50.0      # mm - outer width\nbox_d = 30.0      # mm - outer depth\nbox_h = 20.0      # mm - base outer height\nwall = 2.0        # mm\nfloor_t = 2.0     # mm\nlid_t = 2.5       # mm - lid plate thickness\nlip_h = 5.0       # mm - lid lip depth into the box\nclearance = 0.15  # mm - snap running clearance\nbead = 0.8        # mm - snap bead/groove depth\nbead_h = 1.6      # mm - bead/groove height\ngroove_below_rim = 2.0  # mm\ncorner_r = 3.0    # mm\n\ninner_w = box_w - 2 * wall\ninner_d = box_d - 2 * wall\n\n# Base: hollow box (boolean subtraction pattern)\nouter = (\n    cq.Workplane(\"XY\").box(box_w, box_d, box_h, centered=(True, True, False))\n    .edges(\"|Z\").fillet(corner_r)\n)\ninner = (\n    cq.Workplane(\"XY\").workplane(offset=floor_t)\n    .box(inner_w, inner_d, box_h, centered=(True, True, False))\n    .edges(\"|Z\").fillet(max(0.1, corner_r - wall))\n)\nbase = outer.cut(inner)\n\n# Snap groove: rectangular ring recessed into the cavity walls near the rim\ngroove_z = box_h - groove_below_rim - bead_h\nring_outer = (\n    cq.Workplane(\"XY\").workplane(offset=groove_z)\n    .box(inner_w + 2 * bead, inner_d + 2 * bead, bead_h, centered=(True, True, False))\n    .edges(\"|Z\").fillet(max(0.1, corner_r - wall))\n)\nring_inner = (\n    cq.Workplane(\"XY\").workplane(offset=groove_z)\n    .box(inner_w, inner_d, bead_h, centered=(True, True, False))\n    .edges(\"|Z\").fillet(max(0.1, corner_r - wall))\n)\nbase = base.cut(ring_outer.cut(ring_inner))\n\n# Lid: plate + lip that enters the cavity, with matching snap beads on the lip\nlip_w = inner_w - 2 * clearance\nlip_d = inner_d - 2 * clearance\nplate = (\n    cq.Workplane(\"XY\").box(box_w, box_d, lid_t, centered=(True, True, False))\n    .edges(\"|Z\").fillet(corner_r)\n)\nlip = (\n    cq.Workplane(\"XY\").workplane(offset=lid_t)\n    .box(lip_w, lip_d, lip_h, centered=(True, True, False))\n    .edges(\"|Z\").fillet(max(0.1, corner_r - wall - clearance))\n)\nbead_z = lid_t + lip_h - groove_below_rim - bead_h\nbead_outer = (\n    cq.Workplane(\"XY\").workplane(offset=bead_z)\n    .box(lip_w + 2 * bead, lip_d + 2 * bead, bead_h, centered=(True, True, False))\n    .edges(\"|Z\").fillet(max(0.1, corner_r - wall - clearance))\n)\nlid = plate.union(lip).union(bead_outer)\n\n# Print orientation: both parts flat on the bed, lid printed top-plate down\nresult = (\n    cq.Assembly()\n    .add(base, loc=cq.Location((0, 0, 0)))\n    .add(lid, loc=cq.Location((box_w + 10, 0, 0)))\n)\n"
+          }
+        }
+      ],
+      "finishReason": "tool-calls"
+    },
+    {
+      "text": "Made a 50x30x20mm hollow box with a snap-fit lid: rounded corners (3mm fillet), 2mm walls, a lip that inserts into the box cavity, and a snap bead/groove pair near the rim for a friction-fit closure. Both parts are laid flat on the print bed side by side (combined bbox 110x30x20mm). The overhang warning comes from the small snap bead geometry - it's cosmetic and shouldn't need supports given the tiny bead size (0.8mm).",
+      "toolCalls": [],
+      "finishReason": "stop"
+    }
+  ],
+  "workerCalls": [
+    {
+      "ok": true,
+      "code": "import cadquery as cq\n# PARAMETERS\nbox_w = 50.0      # mm - outer width\nbox_d = 30.0      # mm - outer depth\nbox_h = 20.0      # mm - base outer height\nwall = 2.0        # mm\nfloor_t = 2.0     # mm\nlid_t = 2.5       # mm - lid plate thickness\nlip_h = 5.0       # mm - lid lip depth into the box\nclearance = 0.15  # mm - snap running clearance\nbead = 0.8        # mm - snap bead/groove depth\nbead_h = 1.6      # mm - bead/groove height\ngroove_below_rim = 2.0  # mm\ncorner_r = 3.0    # mm\n\ninner_w = box_w - 2 * wall\ninner_d = box_d - 2 * wall\n\n# Base: hollow box (boolean subtraction pattern)\nouter = (\n    cq.Workplane(\"XY\").box(box_w, box_d, box_h, centered=(True, True, False))\n    .edges(\"|Z\").fillet(corner_r)\n)\ninner = (\n    cq.Workplane(\"XY\").workplane(offset=floor_t)\n    .box(inner_w, inner_d, box_h, centered=(True, True, False))\n    .edges(\"|Z\").fillet(max(0.1, corner_r - wall))\n)\nbase = outer.cut(inner)\n\n# Snap groove: rectangular ring recessed into the cavity walls near the rim\ngroove_z = box_h - groove_below_rim - bead_h\nring_outer = (\n    cq.Workplane(\"XY\").workplane(offset=groove_z)\n    .box(inner_w + 2 * bead, inner_d + 2 * bead, bead_h, centered=(True, True, False))\n    .edges(\"|Z\").fillet(max(0.1, corner_r - wall))\n)\nring_inner = (\n    cq.Workplane(\"XY\").workplane(offset=groove_z)\n    .box(inner_w, inner_d, bead_h, centered=(True, True, False))\n    .edges(\"|Z\").fillet(max(0.1, corner_r - wall))\n)\nbase = base.cut(ring_outer.cut(ring_inner))\n\n# Lid: plate + lip that enters the cavity, with matching snap beads on the lip\nlip_w = inner_w - 2 * clearance\nlip_d = inner_d - 2 * clearance\nplate = (\n    cq.Workplane(\"XY\").box(box_w, box_d, lid_t, centered=(True, True, False))\n    .edges(\"|Z\").fillet(corner_r)\n)\nlip = (\n    cq.Workplane(\"XY\").workplane(offset=lid_t)\n    .box(lip_w, lip_d, lip_h, centered=(True, True, False))\n    .edges(\"|Z\").fillet(max(0.1, corner_r - wall - clearance))\n)\nbead_z = lid_t + lip_h - groove_below_rim - bead_h\nbead_outer = (\n    cq.Workplane(\"XY\").workplane(offset=bead_z)\n    .box(lip_w + 2 * bead, lip_d + 2 * bead, bead_h, centered=(True, True, False))\n    .edges(\"|Z\").fillet(max(0.1, corner_r - wall - clearance))\n)\nlid = plate.union(lip).union(bead_outer)\n\n# Print orientation: both parts flat on the bed, lid printed top-plate down\nresult = (\n    cq.Assembly()\n    .add(base, loc=cq.Location((0, 0, 0)))\n    .add(lid, loc=cq.Location((box_w + 10, 0, 0)))\n)\n",
+      "response": {
+        "stl_base64": "",
+        "metrics": {
+          "bbox": {
+            "x": 110,
+            "y": 30,
+            "z": 20
+          },
+          "volume": 17931.44
+        },
+        "warnings": [
+          "Overhang warning: 19% of faces exceed 45 degrees and may need supports."
+        ],
+        "console_output": null
+      }
+    }
+  ],
+  "score": {
+    "rendered": true,
+    "watertight": true,
+    "bboxOk": true,
+    "warningsCount": 1,
+    "pass": true
+  },
+  "metrics": {
+    "stepsUsed": 2,
+    "inputTokens": 16081,
+    "outputTokens": 1425,
+    "costUsd": 0.046411999999999995,
+    "durationMs": 16886
+  }
+}

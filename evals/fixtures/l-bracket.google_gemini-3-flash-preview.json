@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "caseId": "l-bracket",
+  "model": "google/gemini-3-flash-preview",
+  "systemPromptSha256": "e552770ab7cc9b714b33439c2f3cf141302dfa4bf756fb320ba560e4cf5996dc",
+  "recordedAt": "2026-07-02T15:51:02.128Z",
+  "llmSteps": [
+    {
+      "text": "",
+      "toolCalls": [
+        {
+          "toolCallId": "tool_runCadquery_oR7k6XfcnT8tl1dYlcoE",
+          "toolName": "runCadquery",
+          "input": {
+            "code": "import cadquery as cq\n\n# PARAMETERS\nwidth = 20.0      # mm - width of the bracket\nleg_long = 60.0   # mm - length of the long leg\nleg_short = 40.0  # mm - length of the short leg\nthickness = 4.0   # mm - thickness of the bracket walls\nhole_d = 3.4      # mm - M3 clearance hole\nfillet_r = 3.0    # mm - outer corner fillet\n\n# Hole positions\n# 2 holes on the long leg, 1 on the short leg\nhole_long_1 = leg_long - 10.0\nhole_long_2 = leg_long / 2.0\nhole_short_1 = leg_short - 10.0\n\n# Print orientation: L-shape lying on its side (XZ plane) to avoid supports\n# We build the profile in 2D and extrude\nresult = (\n    cq.Workplane(\"XY\")\n    # Draw the L-profile\n    .lineTo(leg_long, 0)\n    .lineTo(leg_long, thickness)\n    .lineTo(thickness, thickness)\n    .lineTo(thickness, leg_short)\n    .lineTo(0, leg_short)\n    .close()\n    .extrude(width)\n    # Fillet the outer corner for strength and aesthetics\n    .edges(\"|Z\").fillet(fillet_r)\n    # Holes on the long leg (face at Y=0)\n    .faces(\"<Y\").workplane()\n    .center(leg_long/2, width/2) # Move to center of the face\n    .pushPoints([\n        (hole_long_1 - leg_long/2, 0),\n        (hole_long_2 - leg_long/2, 0)\n    ])\n    .hole(hole_d)\n    # Hole on the short leg (face at X=0)\n    .faces(\"<X\").workplane()\n    .center(leg_short/2, width/2)\n    .pushPoints([\n        (hole_short_1 - leg_short/2, 0)\n    ])\n    .hole(hole_d)\n)\n"
+          }
+        }
+      ],
+      "finishReason": "tool-calls"
+    },
+    {
+      "text": "",
+      "toolCalls": [
+        {
+          "toolCallId": "tool_runCadquery_yddmrymzfF7HwaMjuTni",
+          "toolName": "runCadquery",
+          "input": {
+            "code": "import cadquery as cq\n\n# PARAMETERS\nwidth = 20.0      # mm - width of the bracket\nleg_long = 60.0   # mm - length of the long leg\nleg_short = 40.0  # mm - length of the short leg\nthickness = 5.0   # mm - thickness of the bracket walls\nhole_d = 3.4      # mm - M3 clearance hole (3.4mm for loose fit)\n\n# Construction\n# We create two boxes and union them to form the L-shape\n# This is more robust than complex sketching for simple brackets\n\n# Long leg\nbase = cq.Workplane(\"XY\").box(leg_long, width, thickness, centered=(False, True, False))\n\n# Short leg (vertical)\nupright = (\n    cq.Workplane(\"XY\")\n    .box(thickness, width, leg_short, centered=(False, True, False))\n)\n\n# Combine\nbracket = base.union(upright)\n\n# Add holes\n# Two holes on the long leg\nresult = (\n    bracket\n    .faces(\">Z\").workplane()\n    .center(leg_long/2 + thickness/2, 0) # Center relative to the long leg portion\n    .pushPoints([\n        (leg_long/2 - 10, 0),\n        (0, 0)\n    ])\n    .hole(hole_d)\n    # One hole on the short leg\n    .faces(\">X\").workplane()\n    .center(leg_short/2 + thickness/2, 0)\n    .pushPoints([\n        (leg_short/2 - 10, 0)\n    ])\n    .hole(hole_d)\n    # Add a small chamfer to the print bed edge for better first layer\n    .edges(\"<Z\").chamfer(0.5)\n)\n"
+          }
+        }
+      ],
+      "finishReason": "tool-calls"
+    },
+    {
+      "text": "This L-bracket measures 60x40mm with a 20mm width and 5mm thickness. It features two M3 clearance holes (3.4mm) on the 60mm leg and one on the 40mm leg, with a 0.5mm chamfer on the base for a cleaner 3D print.\n\n**Note on Printing:** To avoid the need for supports on the vertical leg's hole, you may want to print the bracket lying on its side (on the XZ plane).",
+      "toolCalls": [],
+      "finishReason": "stop"
+    }
+  ],
+  "workerCalls": [
+    {
+      "ok": false,
+      "code": "import cadquery as cq\n\n# PARAMETERS\nwidth = 20.0      # mm - width of the bracket\nleg_long = 60.0   # mm - length of the long leg\nleg_short = 40.0  # mm - length of the short leg\nthickness = 4.0   # mm - thickness of the bracket walls\nhole_d = 3.4      # mm - M3 clearance hole\nfillet_r = 3.0    # mm - outer corner fillet\n\n# Hole positions\n# 2 holes on the long leg, 1 on the short leg\nhole_long_1 = leg_long - 10.0\nhole_long_2 = leg_long / 2.0\nhole_short_1 = leg_short - 10.0\n\n# Print orientation: L-shape lying on its side (XZ plane) to avoid supports\n# We build the profile in 2D and extrude\nresult = (\n    cq.Workplane(\"XY\")\n    # Draw the L-profile\n    .lineTo(leg_long, 0)\n    .lineTo(leg_long, thickness)\n    .lineTo(thickness, thickness)\n    .lineTo(thickness, leg_short)\n    .lineTo(0, leg_short)\n    .close()\n    .extrude(width)\n    # Fillet the outer corner for strength and aesthetics\n    .edges(\"|Z\").fillet(fillet_r)\n    # Holes on the long leg (face at Y=0)\n    .faces(\"<Y\").workplane()\n    .center(leg_long/2, width/2) # Move to center of the face\n    .pushPoints([\n        (hole_long_1 - leg_long/2, 0),\n        (hole_long_2 - leg_long/2, 0)\n    ])\n    .hole(hole_d)\n    # Hole on the short leg (face at X=0)\n    .faces(\"<X\").workplane()\n    .center(leg_short/2, width/2)\n    .pushPoints([\n        (hole_short_1 - leg_short/2, 0)\n    ])\n    .hole(hole_d)\n)\n",
+      "error": "CAD Rendering Failed: Line 30 of your script: StdFail_NotDone: BRep_API: command not done"
+    },
+    {
+      "ok": true,
+      "code": "import cadquery as cq\n\n# PARAMETERS\nwidth = 20.0      # mm - width of the bracket\nleg_long = 60.0   # mm - length of the long leg\nleg_short = 40.0  # mm - length of the short leg\nthickness = 5.0   # mm - thickness of the bracket walls\nhole_d = 3.4      # mm - M3 clearance hole (3.4mm for loose fit)\n\n# Construction\n# We create two boxes and union them to form the L-shape\n# This is more robust than complex sketching for simple brackets\n\n# Long leg\nbase = cq.Workplane(\"XY\").box(leg_long, width, thickness, centered=(False, True, False))\n\n# Short leg (vertical)\nupright = (\n    cq.Workplane(\"XY\")\n    .box(thickness, width, leg_short, centered=(False, True, False))\n)\n\n# Combine\nbracket = base.union(upright)\n\n# Add holes\n# Two holes on the long leg\nresult = (\n    bracket\n    .faces(\">Z\").workplane()\n    .center(leg_long/2 + thickness/2, 0) # Center relative to the long leg portion\n    .pushPoints([\n        (leg_long/2 - 10, 0),\n        (0, 0)\n    ])\n    .hole(hole_d)\n    # One hole on the short leg\n    .faces(\">X\").workplane()\n    .center(leg_short/2 + thickness/2, 0)\n    .pushPoints([\n        (leg_short/2 - 10, 0)\n    ])\n    .hole(hole_d)\n    # Add a small chamfer to the print bed edge for better first layer\n    .edges(\"<Z\").chamfer(0.5)\n)\n",
+      "response": {
+        "stl_base64": "",
+        "metrics": {
+          "bbox": {
+            "x": 60,
+            "y": 20,
+            "z": 40
+          },
+          "volume": 9386.44
+        },
+        "warnings": [
+          "Overhang warning: 19% of faces exceed 45 degrees and may need supports."
+        ],
+        "console_output": null
+      }
+    }
+  ],
+  "score": {
+    "rendered": true,
+    "watertight": true,
+    "bboxOk": true,
+    "warningsCount": 1,
+    "pass": true
+  },
+  "metrics": {
+    "stepsUsed": 3,
+    "inputTokens": 16777,
+    "outputTokens": 1076,
+    "costUsd": 0.0116165,
+    "durationMs": 11078
+  }
+}

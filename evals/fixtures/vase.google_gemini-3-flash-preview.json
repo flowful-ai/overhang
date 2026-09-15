@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "caseId": "vase",
+  "model": "google/gemini-3-flash-preview",
+  "systemPromptSha256": "e552770ab7cc9b714b33439c2f3cf141302dfa4bf756fb320ba560e4cf5996dc",
+  "recordedAt": "2026-07-02T15:52:05.743Z",
+  "llmSteps": [
+    {
+      "text": "",
+      "toolCalls": [
+        {
+          "toolCallId": "tool_runCadquery_LDDkk91BGe5kSaXqcvK9",
+          "toolName": "runCadquery",
+          "input": {
+            "code": "import cadquery as cq\n\n# PARAMETERS\nheight = 100.0      # mm - total height\nbase_d = 40.0       # mm - base diameter\nbelly_d = 60.0      # mm - maximum diameter\nneck_d = 30.0       # mm - neck diameter\nrim_d = 45.0        # mm - top rim diameter\nwall_t = 2.5        # mm - wall thickness\nfloor_t = 3.0       # mm - bottom thickness\n\n# Profile points (x, z)\n# We define the outer profile first\npoints = [\n    (base_d / 2, 0),                    # Bottom outer\n    (belly_d / 2, height * 0.35),       # Belly outer\n    (neck_d / 2, height * 0.8),        # Neck outer\n    (rim_d / 2, height),                # Rim outer top\n    (rim_d / 2 - wall_t, height),       # Rim inner top\n    (neck_d / 2 - wall_t, height * 0.8), # Neck inner\n    (belly_d / 2 - wall_t, height * 0.35), # Belly inner\n    (base_d / 2 - wall_t, floor_t),     # Bottom inner\n    (0, floor_t),                       # Center floor\n    (0, 0)                              # Center bottom\n]\n\n# Create the profile using a spline for the outer and inner curves\n# Spline for outer surface, then inner surface\nresult = (\n    cq.Workplane(\"XZ\")\n    .moveTo(0, 0)\n    .lineTo(base_d / 2, 0)\n    .spline([\n        (belly_d / 2, height * 0.35),\n        (neck_d / 2, height * 0.8),\n        (rim_d / 2, height)\n    ], includeCurrent=True)\n    .lineTo(rim_d / 2 - wall_t, height)\n    .spline([\n        (neck_d / 2 - wall_t, height * 0.8),\n        (belly_d / 2 - wall_t, height * 0.35),\n        (base_d / 2 - wall_t, floor_t)\n    ], includeCurrent=True)\n    .lineTo(0, floor_t)\n    .close()\n    .revolve(360, (0, 0, 0), (0, 1, 0))\n)\n"
+          }
+        }
+      ],
+      "finishReason": "tool-calls"
+    },
+    {
+      "text": "This is a 100mm tall revolved vase with a 60mm diameter belly. It features a 2.5mm wall thickness and a 3mm solid base for stability, with a smooth spline-based profile transitioning from a 40mm base to a 30mm neck and a 45mm flared rim.",
+      "toolCalls": [],
+      "finishReason": "stop"
+    }
+  ],
+  "workerCalls": [
+    {
+      "ok": true,
+      "code": "import cadquery as cq\n\n# PARAMETERS\nheight = 100.0      # mm - total height\nbase_d = 40.0       # mm - base diameter\nbelly_d = 60.0      # mm - maximum diameter\nneck_d = 30.0       # mm - neck diameter\nrim_d = 45.0        # mm - top rim diameter\nwall_t = 2.5        # mm - wall thickness\nfloor_t = 3.0       # mm - bottom thickness\n\n# Profile points (x, z)\n# We define the outer profile first\npoints = [\n    (base_d / 2, 0),                    # Bottom outer\n    (belly_d / 2, height * 0.35),       # Belly outer\n    (neck_d / 2, height * 0.8),        # Neck outer\n    (rim_d / 2, height),                # Rim outer top\n    (rim_d / 2 - wall_t, height),       # Rim inner top\n    (neck_d / 2 - wall_t, height * 0.8), # Neck inner\n    (belly_d / 2 - wall_t, height * 0.35), # Belly inner\n    (base_d / 2 - wall_t, floor_t),     # Bottom inner\n    (0, floor_t),                       # Center floor\n    (0, 0)                              # Center bottom\n]\n\n# Create the profile using a spline for the outer and inner curves\n# Spline for outer surface, then inner surface\nresult = (\n    cq.Workplane(\"XZ\")\n    .moveTo(0, 0)\n    .lineTo(base_d / 2, 0)\n    .spline([\n        (belly_d / 2, height * 0.35),\n        (neck_d / 2, height * 0.8),\n        (rim_d / 2, height)\n    ], includeCurrent=True)\n    .lineTo(rim_d / 2 - wall_t, height)\n    .spline([\n        (neck_d / 2 - wall_t, height * 0.8),\n        (belly_d / 2 - wall_t, height * 0.35),\n        (base_d / 2 - wall_t, floor_t)\n    ], includeCurrent=True)\n    .lineTo(0, floor_t)\n    .close()\n    .revolve(360, (0, 0, 0), (0, 1, 0))\n)\n",
+      "response": {
+        "stl_base64": "",
+        "metrics": {
+          "bbox": {
+            "x": 63.1,
+            "y": 63.1,
+            "z": 100
+          },
+          "volume": 42573.27
+        },
+        "warnings": null,
+        "console_output": null
+      }
+    }
+  ],
+  "score": {
+    "rendered": true,
+    "watertight": true,
+    "bboxOk": true,
+    "warningsCount": 0,
+    "pass": true
+  },
+  "metrics": {
+    "stepsUsed": 2,
+    "inputTokens": 10407,
+    "outputTokens": 686,
+    "costUsd": 0.007261500000000001,
+    "durationMs": 6265
+  }
+}

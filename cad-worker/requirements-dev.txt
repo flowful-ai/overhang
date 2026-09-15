@@ -1,0 +1,5 @@
+# Test-only dependencies. Not installed in the production image; see
+# cad-worker/Dockerfile and .github/workflows/test.yml for how these are used.
+pytest==9.1.1
+httpx==0.28.1
+ruff==0.15.20

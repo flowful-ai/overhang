@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "caseId": "l-bracket",
+  "model": "deepseek/deepseek-v4-flash",
+  "systemPromptSha256": "e552770ab7cc9b714b33439c2f3cf141302dfa4bf756fb320ba560e4cf5996dc",
+  "recordedAt": "2026-07-02T15:45:58.147Z",
+  "llmSteps": [
+    {
+      "text": "",
+      "toolCalls": [
+        {
+          "toolCallId": "call_12da7e03630f4e49a067ad82",
+          "toolName": "runCadquery",
+          "input": {
+            "code": "import cadquery as cq\n\n# PARAMETERS\nleg_long = 60.0      # mm - long leg length\nleg_short = 40.0     # mm - short leg length\nwidth = 20.0         # mm - bracket width (both legs)\nthick = 4.0          # mm - bracket thickness\nscrew_d = 3.2        # mm - M3 clearance hole (3mm + 0.2mm clearance)\n\n# Build L-bracket from 2D sketch, extruded in Z\n# Print orientation: flat on build plate (L-shape in XY, Z up)\nresult = (\n    cq.Workplane(\"XY\")\n    .moveTo(0, 0)\n    .lineTo(leg_long, 0)\n    .lineTo(leg_long, width)\n    .lineTo(width, width)        # inner corner of the L\n    .lineTo(width, leg_short)\n    .lineTo(0, leg_short)\n    .close()\n    .extrude(thick)\n    .faces(\">Z\").workplane()\n    .pushPoints([\n        (leg_long - 10, width / 2),   # long leg, 10mm from free end\n        (width / 2, leg_short - 7),    # short leg, 7mm from free end\n        (width / 2, 20),               # short leg, midway\n    ])\n    .hole(screw_d)\n)"
+          }
+        }
+      ],
+      "finishReason": "tool-calls"
+    },
+    {
+      "text": "The L-bracket rendered successfully. It's a 60×40mm L-bracket (both legs 20mm wide) with 3× M3 clearance holes (3.2mm diameter):\n\n- **Long leg** (60mm): one hole 10mm from the free end  \n- **Short leg** (40mm): two holes — one 7mm from the top, one midway  \n\nThe part is 4mm thick and is designed to be printed flat on the build plate (no supports needed despite the conservative overhang warning — the vertical side walls are only 4mm tall).",
+      "toolCalls": [],
+      "finishReason": "stop"
+    }
+  ],
+  "workerCalls": [
+    {
+      "ok": true,
+      "code": "import cadquery as cq\n\n# PARAMETERS\nleg_long = 60.0      # mm - long leg length\nleg_short = 40.0     # mm - short leg length\nwidth = 20.0         # mm - bracket width (both legs)\nthick = 4.0          # mm - bracket thickness\nscrew_d = 3.2        # mm - M3 clearance hole (3mm + 0.2mm clearance)\n\n# Build L-bracket from 2D sketch, extruded in Z\n# Print orientation: flat on build plate (L-shape in XY, Z up)\nresult = (\n    cq.Workplane(\"XY\")\n    .moveTo(0, 0)\n    .lineTo(leg_long, 0)\n    .lineTo(leg_long, width)\n    .lineTo(width, width)        # inner corner of the L\n    .lineTo(width, leg_short)\n    .lineTo(0, leg_short)\n    .close()\n    .extrude(thick)\n    .faces(\">Z\").workplane()\n    .pushPoints([\n        (leg_long - 10, width / 2),   # long leg, 10mm from free end\n        (width / 2, leg_short - 7),    # short leg, 7mm from free end\n        (width / 2, 20),               # short leg, midway\n    ])\n    .hole(screw_d)\n)",
+      "response": {
+        "stl_base64": "",
+        "metrics": {
+          "bbox": {
+            "x": 60,
+            "y": 40,
+            "z": 4
+          },
+          "volume": 6303.49
+        },
+        "warnings": [
+          "Overhang warning: 25% of faces exceed 45 degrees and may need supports."
+        ],
+        "console_output": null
+      }
+    }
+  ],
+  "score": {
+    "rendered": true,
+    "watertight": true,
+    "bboxOk": true,
+    "warningsCount": 1,
+    "pass": true
+  },
+  "metrics": {
+    "stepsUsed": 2,
+    "inputTokens": 16006,
+    "outputTokens": 6630,
+    "costUsd": 0.0028680679999999997,
+    "durationMs": 77175
+  }
+}
