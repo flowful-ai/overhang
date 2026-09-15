@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
-import { convertToModelMessages, type ModelMessage } from "ai";
+import { convertToModelMessages, createUIMessageStreamResponse, type ModelMessage, type UIMessageChunk } from "ai";
 import type { LanguageModelV3 } from "@ai-sdk/provider";
 import { z } from "zod";
 import { APP_CONSTANTS } from "@/lib/utils";
 import { OMITTED_SNAPSHOT_TEXT } from "@/lib/constants";
 import { withRoute } from "@/lib/api-handler";
-import { toSanitizedMessage } from "@/lib/sanitize-error";
+import { sanitizeError, toSanitizedMessage } from "@/lib/sanitize-error";
 import { withGenerationLease } from "@/lib/in-flight";
 import {
   AGENT_TURN_TIMEOUT_MS,
@@ -125,6 +125,23 @@ function checkContentLimits(messages: AgentUIMessage[]): string | null {
   return null;
 }
 
+// The UI stream reports an aborted turn with an "abort" chunk, which the chat
+// client treats as a clean finish. The only abort a listening client can see
+// is the server's own turn timeout (a client that stopped has stopped reading),
+// so it is sent as an error instead: the thread shows it with Retry, and a
+// queued follow-up is not sent on top of a turn that never finished.
+function abortAsError(): TransformStream<UIMessageChunk, UIMessageChunk> {
+  return new TransformStream({
+    transform(chunk, controller) {
+      if (chunk.type !== "abort") {
+        controller.enqueue(chunk);
+        return;
+      }
+      controller.enqueue({ type: "error", errorText: sanitizeError(chunk.reason ?? "The agent turn was aborted.") });
+    },
+  });
+}
+
 export interface GenerateCadDeps {
   /** Model adapter for the requested model id (the route applies the allowlist). */
   model: (requestedModelId: string | undefined) => LanguageModelV3;
@@ -195,13 +212,16 @@ export function createGenerateCadPost(deps: GenerateCadDeps) {
               { status: 503 },
             );
           }
-          return turn.stream.toUIMessageStreamResponse({
-            // Already logged by the agent turn; this only shapes the client text.
-            onError: (e) => {
-              const prefix = e instanceof Error && e.name && e.name !== "Error" ? `${e.name}: ` : "";
-              return prefix + toSanitizedMessage(e);
-            },
-          });
+          const stream = turn.stream
+            .toUIMessageStream({
+              // Already logged by the agent turn; this only shapes the client text.
+              onError: (e) => {
+                const prefix = e instanceof Error && e.name && e.name !== "Error" ? `${e.name}: ` : "";
+                return prefix + toSanitizedMessage(e);
+              },
+            })
+            .pipeThrough(abortAsError());
+          return createUIMessageStreamResponse({ stream });
         },
         // Backstop a bit longer than the longest possible turn, in case a
         // terminal event is somehow never observed.

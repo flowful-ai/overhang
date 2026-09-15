@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import type { LanguageModelV3StreamPart } from "@ai-sdk/provider";
 import { createGenerateCadPost } from "@/app/api/generate-cad/handler";
-import { openRouterModel } from "@/lib/agent-turn";
+import { AGENT_TURN_TIMEOUT_MS, openRouterModel } from "@/lib/agent-turn";
 
 // The real handler, driven through injected adapters: a mock model and a fake
 // CAD worker (no module mocks).
@@ -294,6 +294,44 @@ describe("generate-cad route — agentic tool loop", () => {
       expect(next.status).toBe(200);
       await readSseStream(next);
     } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("streams the turn timeout as an error, not a clean finish, and frees the slot", async () => {
+    vi.stubEnv("MAX_CONCURRENT_GENERATIONS", "1");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      // A model that never finishes on its own and, like a real provider
+      // fetch, fails once its abort signal fires: only the turn timeout ends it.
+      mockModel = new MockLanguageModelV3({
+        doStream: async ({ abortSignal }) => ({
+          stream: new ReadableStream<LanguageModelV3StreamPart>({
+            start(controller) {
+              controller.enqueue({ type: "stream-start", warnings: [] });
+              abortSignal?.addEventListener("abort", () => controller.error(abortSignal.reason), { once: true });
+            },
+          }),
+        }),
+      });
+      const res = await POST(makeRequest());
+      expect(res.status).toBe(200);
+      const body = readSseStream(res);
+      await vi.advanceTimersByTimeAsync(AGENT_TURN_TIMEOUT_MS);
+      const text = await body;
+
+      // The SDK ends this stream with an "abort" chunk (a clean finish for the
+      // client); the handler must turn it into an error.
+      expect(text).toContain('"type":"error","errorText":"The operation was aborted due to timeout"');
+      expect(text).not.toContain('"type":"abort"');
+
+      vi.useRealTimers();
+      mockModel = new MockLanguageModelV3({ doStream: scriptedDoStream([]) });
+      const next = await POST(makeRequest());
+      expect(next.status).toBe(200);
+      await readSseStream(next);
+    } finally {
+      vi.useRealTimers();
       vi.unstubAllEnvs();
     }
   });

@@ -1,11 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   MAX_QUEUED_MESSAGES,
+  classifyTurnEnd,
   createMessageQueueController,
   initialQueueState,
   outgoingText,
   queueReducer,
-  turnFailed,
+  stopDropsLastUserMessage,
   validateOutgoing,
   type MessageQueueController,
 } from "@/components/chat/message-queue";
@@ -25,6 +26,7 @@ function runningWith(...texts: string[]) {
 }
 
 const texts = (q: MessageQueueController) => q.getState().items.map((i) => i.text);
+const busyError = new Error(JSON.stringify({ error: "Overhang is busy right now. Please try again in a moment." }));
 
 describe("validateOutgoing / outgoingText", () => {
   it("rejects empty and over-long prompts, accepts a bare snapshot", () => {
@@ -40,12 +42,43 @@ describe("validateOutgoing / outgoingText", () => {
   });
 });
 
-describe("turnFailed", () => {
-  it("is false only for a complete assistant reply", () => {
-    expect(turnFailed([{ role: "user" }, { role: "assistant", status: { type: "complete" } }])).toBe(false);
-    expect(turnFailed([{ role: "user" }, { role: "assistant", status: { type: "incomplete" } }])).toBe(true);
-    expect(turnFailed([{ role: "user" }])).toBe(true);
-    expect(turnFailed([])).toBe(true);
+describe("classifyTurnEnd", () => {
+  const assistant = (status: { type: string; reason?: string; error?: unknown }) => [
+    { role: "user" },
+    { role: "assistant", status },
+  ];
+
+  it("reads the last assistant message", () => {
+    expect(classifyTurnEnd(assistant({ type: "complete", reason: "unknown" }))).toBe("done");
+    expect(classifyTurnEnd(assistant({ type: "incomplete", reason: "error", error: "boom" }))).toBe("error");
+    expect(classifyTurnEnd(assistant({ type: "incomplete", reason: "error", error: busyError.message }))).toBe("busy");
+    expect(classifyTurnEnd(assistant({ type: "requires-action", reason: "tool-calls" }))).toBe("interrupted");
+    expect(classifyTurnEnd(assistant({ type: "incomplete", reason: "length" }))).toBe("interrupted");
+  });
+
+  it("treats a thread without a reply as failed", () => {
+    expect(classifyTurnEnd([{ role: "user" }])).toBe("error");
+    expect(classifyTurnEnd([])).toBe("error");
+  });
+
+  it("maps the server's turn timeout error to error", () => {
+    const status = { type: "incomplete", reason: "error", error: "The operation was aborted due to timeout" };
+    expect(classifyTurnEnd(assistant(status))).toBe("error");
+  });
+});
+
+describe("stopDropsLastUserMessage", () => {
+  it("is true when no reply has streamed yet", () => {
+    expect(stopDropsLastUserMessage([{ role: "user" }])).toBe(true);
+    expect(
+      stopDropsLastUserMessage([{ role: "user" }, { role: "assistant", content: [], metadata: { isOptimistic: true } }]),
+    ).toBe(true);
+  });
+
+  it("is false once the reply exists", () => {
+    expect(stopDropsLastUserMessage([{ role: "user" }, { role: "assistant", content: [{}] }])).toBe(false);
+    expect(stopDropsLastUserMessage([{ role: "user" }, { role: "assistant", content: [] }])).toBe(false);
+    expect(stopDropsLastUserMessage([])).toBe(false);
   });
 });
 
@@ -95,7 +128,7 @@ describe("edit and remove", () => {
 
   it("emptying a paused queue clears the pause", () => {
     const q = runningWith("a");
-    q.dispatch({ type: "runEnded", failed: true });
+    q.dispatch({ type: "runEnded", outcome: "error" });
     expect(q.getState().pausedBy).toBe("error");
     q.dispatch({ type: "remove", id: q.getState().items[0].id });
     expect(q.getState().pausedBy).toBeNull();
@@ -108,37 +141,39 @@ describe("auto-send", () => {
     const sent: string[] = [];
 
     for (let turn = 0; turn < 3; turn++) {
-      const r = q.dispatch({ type: "runEnded", failed: false });
+      const r = q.dispatch({ type: "runEnded", outcome: "done" });
       expect(r.send).not.toBeNull();
+      expect(q.getState().inFlight).toBe(r.send);
       sent.push(r.send!.text);
       // Sending the item starts the next turn.
       q.dispatch({ type: "runStarted" });
     }
 
     expect(sent).toEqual(["a", "b", "c"]);
-    expect(q.dispatch({ type: "runEnded", failed: false }).send).toBeNull();
+    expect(q.dispatch({ type: "runEnded", outcome: "done" }).send).toBeNull();
+    expect(q.getState().inFlight).toBeNull();
   });
 
   it("sends nothing when the queue is empty", () => {
     const q = runningWith();
-    expect(q.dispatch({ type: "runEnded", failed: false }).send).toBeNull();
+    expect(q.dispatch({ type: "runEnded", outcome: "done" }).send).toBeNull();
     expect(q.getState().pausedBy).toBeNull();
   });
 });
 
 describe("pause and resume", () => {
-  it("pauses instead of sending when the turn failed", () => {
+  it.each(["error", "busy", "interrupted"] as const)("pauses instead of sending when the turn ended %s", (outcome) => {
     const q = runningWith("a");
-    const r = q.dispatch({ type: "runEnded", failed: true });
+    const r = q.dispatch({ type: "runEnded", outcome });
     expect(r.send).toBeNull();
     expect(r.announce).toBe("Queue paused.");
-    expect(q.getState().pausedBy).toBe("error");
+    expect(q.getState().pausedBy).toBe(outcome);
   });
 
   it("pauses when the user pressed Stop, even if the reply looks complete", () => {
     const q = runningWith("a");
-    q.dispatch({ type: "stop" });
-    const r = q.dispatch({ type: "runEnded", failed: false });
+    q.dispatch({ type: "stop", sentMessageDropped: false });
+    const r = q.dispatch({ type: "runEnded", outcome: "done" });
     expect(r.send).toBeNull();
     expect(q.getState().pausedBy).toBe("stopped");
     expect(q.getState().stopRequested).toBe(false);
@@ -146,54 +181,105 @@ describe("pause and resume", () => {
 
   it("a Stop in one turn does not pause the next", () => {
     const q = runningWith();
-    q.dispatch({ type: "stop" });
-    q.dispatch({ type: "runEnded", failed: false });
+    q.dispatch({ type: "stop", sentMessageDropped: false });
+    q.dispatch({ type: "runEnded", outcome: "done" });
     q.dispatch({ type: "runStarted" });
     enqueue(q, "a");
-    expect(q.dispatch({ type: "runEnded", failed: false }).send?.text).toBe("a");
+    expect(q.dispatch({ type: "runEnded", outcome: "done" }).send?.text).toBe("a");
   });
 
-  it("stays paused across a turn started some other way (e.g. Retry)", () => {
+  it("stays paused across a turn started some other way (e.g. Retry), keeping the latest reason", () => {
     const q = runningWith("a", "b");
-    q.dispatch({ type: "runEnded", failed: true });
+    q.dispatch({ type: "runEnded", outcome: "busy" });
     q.dispatch({ type: "runStarted" });
-    const r = q.dispatch({ type: "runEnded", failed: false });
-    expect(r.send).toBeNull();
-    expect(r.announce).toBeNull();
+    const done = q.dispatch({ type: "runEnded", outcome: "done" });
+    expect(done.send).toBeNull();
+    expect(done.announce).toBeNull();
+    expect(q.getState().pausedBy).toBe("busy");
+    q.dispatch({ type: "runStarted" });
+    q.dispatch({ type: "runEnded", outcome: "error" });
     expect(q.getState().pausedBy).toBe("error");
   });
 
   it("resume while idle sends the head now, and later items follow automatically", () => {
     const q = runningWith("a", "b");
-    q.dispatch({ type: "runEnded", failed: true });
-    const r = q.dispatch({ type: "resume", isRunning: false });
+    q.dispatch({ type: "runEnded", outcome: "error" });
+    const r = q.dispatch({ type: "resume", isRunning: false, canRetry: true });
     expect(r.send?.text).toBe("a");
+    expect(r.retry).toBe(false);
     expect(q.getState().pausedBy).toBeNull();
     q.dispatch({ type: "runStarted" });
-    expect(q.dispatch({ type: "runEnded", failed: false }).send?.text).toBe("b");
+    expect(q.dispatch({ type: "runEnded", outcome: "done" }).send?.text).toBe("b");
   });
 
   it("resume mid-turn only unpauses; the turn's end sends", () => {
     const q = runningWith("a");
-    q.dispatch({ type: "stop" });
-    q.dispatch({ type: "runEnded", failed: false });
+    q.dispatch({ type: "stop", sentMessageDropped: false });
+    q.dispatch({ type: "runEnded", outcome: "done" });
     q.dispatch({ type: "runStarted" });
-    const r = q.dispatch({ type: "resume", isRunning: true });
+    const r = q.dispatch({ type: "resume", isRunning: true, canRetry: false });
     expect(r.send).toBeNull();
     expect(q.getState().pausedBy).toBeNull();
-    expect(q.dispatch({ type: "runEnded", failed: false }).send?.text).toBe("a");
+    expect(q.dispatch({ type: "runEnded", outcome: "done" }).send?.text).toBe("a");
+  });
+
+  it("resume after busy retries the failed message and keeps the queue intact", () => {
+    const q = runningWith("a");
+    q.dispatch({ type: "runEnded", outcome: "busy" });
+    const r = q.dispatch({ type: "resume", isRunning: false, canRetry: true });
+    expect(r.retry).toBe(true);
+    expect(r.send).toBeNull();
+    expect(texts(q)).toEqual(["a"]);
+    expect(q.getState().pausedBy).toBeNull();
+  });
+
+  it("resume after busy sends the head when there is nothing left to retry", () => {
+    const q = runningWith("a");
+    q.dispatch({ type: "runEnded", outcome: "busy" });
+    const r = q.dispatch({ type: "resume", isRunning: false, canRetry: false });
+    expect(r.retry).toBe(false);
+    expect(r.send?.text).toBe("a");
+  });
+});
+
+describe("stop before the reply streams", () => {
+  it("returns the queue's in-flight message to the head of the queue, paused", () => {
+    const q = runningWith("a", "b");
+    const { send } = q.dispatch({ type: "runEnded", outcome: "done" });
+    q.dispatch({ type: "runStarted" });
+    const r = q.dispatch({ type: "stop", sentMessageDropped: true });
+    expect(r.announce).toBe("Stopped message returned to the queue.");
+    expect(q.getState().items[0]).toBe(send);
+    expect(texts(q)).toEqual(["a", "b"]);
+    q.dispatch({ type: "runEnded", outcome: "done" });
+    expect(q.getState().pausedBy).toBe("stopped");
+  });
+
+  it("restores past the cap rather than losing the message", () => {
+    const q = runningWith(...Array.from({ length: MAX_QUEUED_MESSAGES }, (_, i) => `m${i}`));
+    q.dispatch({ type: "runEnded", outcome: "done" });
+    q.dispatch({ type: "runStarted" });
+    enqueue(q, "fills the cap again");
+    q.dispatch({ type: "stop", sentMessageDropped: true });
+    expect(q.getState().items).toHaveLength(MAX_QUEUED_MESSAGES + 1);
+  });
+
+  it("restores nothing for a turn the queue did not send", () => {
+    const q = runningWith("a");
+    q.dispatch({ type: "stop", sentMessageDropped: true });
+    expect(texts(q)).toEqual(["a"]);
   });
 });
 
 describe("clear (New Chat)", () => {
-  it("drops items, pause and stop flag", () => {
+  it("drops items, pause, stop flag and in-flight item", () => {
     const q = runningWith("a", "b");
-    q.dispatch({ type: "runEnded", failed: true });
-    q.dispatch({ type: "stop" });
+    q.dispatch({ type: "runEnded", outcome: "done" });
+    q.dispatch({ type: "stop", sentMessageDropped: false });
     q.dispatch({ type: "clear" });
-    expect(q.getState()).toMatchObject({ items: [], pausedBy: null, stopRequested: false });
+    expect(q.getState()).toMatchObject({ items: [], pausedBy: null, stopRequested: false, inFlight: null });
     // The cancelled turn ending afterwards sends nothing.
-    expect(q.dispatch({ type: "runEnded", failed: false }).send).toBeNull();
+    expect(q.dispatch({ type: "runEnded", outcome: "done" }).send).toBeNull();
   });
 
   it("never reuses ids, so a stale Edit/Remove cannot hit a new item", () => {

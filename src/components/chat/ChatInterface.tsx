@@ -27,11 +27,26 @@ import {
   MAX_QUEUED_MESSAGES,
   createMessageQueueController,
   outgoingText,
-  turnFailed,
   validateOutgoing,
-  type QueuedMessage,
 } from "./message-queue";
+import { createQueueDriver, type QueueThread } from "./queue-driver";
 import { loadWebSearchPreference, saveWebSearchPreference } from "./web-search-preference";
+
+// The thread as the message queue uses it. A queued item goes through the
+// same append as a typed message, so the transport applies the basis, image
+// stripping, model and web search at send time rather than when it was queued.
+function toQueueThread(
+  thread: { cancelRun: () => void; startRun: (config: { parentId: string }) => unknown },
+  append: QueueThread["append"],
+): QueueThread {
+  return {
+    append,
+    cancelRun: () => thread.cancelRun(),
+    startRun: (parentId) => {
+      void thread.startRun({ parentId });
+    },
+  };
+}
 
 export default function ChatInterface({ webSearchAvailable }: { webSearchAvailable: boolean }) {
   const [model, setModel] = useState<string>(MODELS[0].id);
@@ -209,14 +224,14 @@ function ChatInterfaceInner({
     setModelTabBadge(false);
   }, []);
 
-  // Messages sent while a turn runs (message-queue.ts). In memory only.
+  // Messages sent while a turn runs (message-queue.ts), driven by the thread's
+  // running/idle edges (queue-driver.ts). In memory only.
   const [queue] = useState(createMessageQueueController);
   const queueState = useSyncExternalStore(queue.subscribe, queue.getState, queue.getState);
+  const [queueDriver] = useState(() => createQueueDriver(queue, isRunning));
 
   const handleStop = () => {
-    // Recorded before cancelling so the turn's end pauses the queue.
-    queue.dispatch({ type: "stop" });
-    threadRuntime.cancelRun();
+    queueDriver.stop(toQueueThread(threadRuntime, appendUserMessage), threadRuntime.getState().messages);
   };
 
   // Resend the last user message after a failed turn. startRun with that
@@ -230,7 +245,7 @@ function ChatInterfaceInner({
   const performNewChatReset = () => {
     void resetConversation(threadRuntime, {
       isRunning: threadRuntime.getState().isRunning,
-      clearQueue: () => queue.dispatch({ type: "clear" }),
+      clearQueue: queueDriver.clear,
       resetLocalState: () => {
         session.reset();
         setPrompt("");
@@ -268,28 +283,12 @@ function ChatInterfaceInner({
     [threadRuntime],
   );
 
-  // A queued item goes through the same append as a typed message, so the
-  // transport applies the basis, image stripping, model and web search at
-  // send time rather than when it was queued.
-  const sendQueued = useCallback(
-    (item: QueuedMessage) => appendUserMessage(outgoingText(item.text, item.image), item.image),
-    [appendUserMessage],
-  );
-
-  // Drive the queue from the turn's edges. A normal finish sends the next
-  // item; an error or Stop pauses. The controller holds the state outside
-  // React, so a re-run of this effect cannot send an item twice.
-  const prevRunningRef = useRef(isRunning);
+  // A normal finish sends the next item; an error, busy server, unfinished
+  // reply or Stop pauses. The driver acts only on running/idle edges, so a
+  // re-run of this effect cannot send an item twice.
   useEffect(() => {
-    if (prevRunningRef.current === isRunning) return;
-    prevRunningRef.current = isRunning;
-    if (isRunning) {
-      queue.dispatch({ type: "runStarted" });
-      return;
-    }
-    const { send } = queue.dispatch({ type: "runEnded", failed: turnFailed(messages) });
-    if (send) sendQueued(send);
-  }, [isRunning, messages, queue, sendQueued]);
+    queueDriver.observe(toQueueThread(threadRuntime, appendUserMessage), { isRunning, messages });
+  }, [queueDriver, threadRuntime, appendUserMessage, isRunning, messages]);
 
   const tooLongMessage = `Prompt exceeds maximum length of ${APP_CONSTANTS.MAX_PROMPT_LENGTH.toLocaleString()} characters.`;
 
@@ -340,8 +339,7 @@ function ChatInterfaceInner({
   };
 
   const handleResumeQueue = () => {
-    const { send } = queue.dispatch({ type: "resume", isRunning });
-    if (send) sendQueued(send);
+    queueDriver.resume(toQueueThread(threadRuntime, appendUserMessage), { isRunning, messages });
   };
 
   // One-click starter from the empty-state example chips: send immediately so

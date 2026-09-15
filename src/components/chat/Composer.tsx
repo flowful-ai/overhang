@@ -3,10 +3,17 @@
 import { useLayoutEffect, useRef } from "react";
 import { ListPlus, Pencil, Play, Send, Square, X } from "lucide-react";
 import { isStopGuarded } from "./run-control";
-import type { MessageQueueState } from "./message-queue";
+import type { MessageQueueState, PauseReason } from "./message-queue";
 
 const iconButton =
   "p-2 rounded-md text-gray-500 dark:text-gray-400 hover:bg-gray-200 hover:text-gray-700 dark:hover:bg-gray-800 dark:hover:text-gray-200 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500";
+
+const PAUSE_LABEL: Record<PauseReason, string> = {
+  error: "Paused after an error",
+  stopped: "Paused after Stop",
+  busy: "Paused, the server was busy",
+  interrupted: "Paused, the last reply did not finish",
+};
 
 // Prompt input area: queued-message strip, pending-snapshot chip, auto-growing
 // textarea, and the send / queue and stop buttons. Submission and queue logic
@@ -32,6 +39,8 @@ export default function Composer({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const submitButtonRef = useRef<HTMLButtonElement>(null);
   const stopFocusedRef = useRef(false);
+  // The control inside the queued strip that last had focus, if any.
+  const stripFocusRef = useRef<HTMLElement | null>(null);
   const runStartedAtRef = useRef<number | null>(null);
 
   // Auto-grow the textarea from its content, driven by the `prompt` value the
@@ -57,6 +66,16 @@ export default function Composer({
       textareaRef.current?.focus();
     }
   }, [isRunning]);
+
+  // A row can leave the queue on its own (auto-sent, or the strip closes).
+  // If focus was on one of its buttons, it would fall to <body>: move it to
+  // the prompt instead.
+  useLayoutEffect(() => {
+    const el = stripFocusRef.current;
+    if (!el || el.isConnected) return;
+    stripFocusRef.current = null;
+    if (document.activeElement === null || document.activeElement === document.body) textareaRef.current?.focus();
+  }, [queue.items]);
 
   const handleStop = () => {
     if (isStopGuarded(performance.now(), runStartedAtRef.current)) return;
@@ -84,6 +103,13 @@ export default function Composer({
       {items.length > 0 && (
         <section
           aria-labelledby="queued-messages-label"
+          onFocus={(e) => {
+            stripFocusRef.current = e.target;
+          }}
+          onBlur={(e) => {
+            // Focus moved on by the user (not a row being removed): forget it.
+            if (e.target.isConnected) stripFocusRef.current = null;
+          }}
           className="rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950/60"
         >
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-1.5 border-b border-gray-200 dark:border-gray-800">
@@ -91,9 +117,7 @@ export default function Composer({
               Queued ({items.length})
             </p>
             {pausedBy ? (
-              <span className="text-xs text-amber-700 dark:text-amber-300">
-                Paused {pausedBy === "error" ? "after an error" : "after Stop"}
-              </span>
+              <span className="text-xs text-amber-700 dark:text-amber-300">{PAUSE_LABEL[pausedBy]}</span>
             ) : (
               <span className="text-xs text-gray-500 dark:text-gray-400">Sends when the reply finishes</span>
             )}
@@ -104,7 +128,13 @@ export default function Composer({
                   onResumeQueue();
                   focusPrompt();
                 }}
-                title={isRunning ? "Send the queue when this reply finishes" : "Send the next queued message now"}
+                title={
+                  isRunning
+                    ? "Send the queue when this reply finishes"
+                    : pausedBy === "busy"
+                      ? "Retry the message the server was too busy for, then continue"
+                      : "Send the next queued message now"
+                }
                 className="ml-auto flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium text-primary-700 dark:text-primary-300 hover:bg-primary-50 dark:hover:bg-primary-950/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
               >
                 <Play className="w-3.5 h-3.5" aria-hidden />
@@ -112,7 +142,7 @@ export default function Composer({
               </button>
             )}
           </div>
-          <ol className="max-h-40 overflow-y-auto divide-y divide-gray-200 dark:divide-gray-800">
+          <ol className="max-h-48 overflow-y-auto divide-y divide-gray-200 dark:divide-gray-800">
             {items.map((item, index) => {
               const position = index + 1;
               const label = item.text.trim() || "Snapshot only";
@@ -121,14 +151,18 @@ export default function Composer({
                   <span className="text-xs tabular-nums text-gray-400 dark:text-gray-500" aria-hidden>
                     {position}
                   </span>
-                  <span className="flex-1 min-w-0 truncate text-sm text-gray-700 dark:text-gray-200" title={item.text}>
-                    {label}
-                  </span>
-                  {item.image && (
-                    <span className="shrink-0 px-1.5 py-0.5 rounded bg-gray-200 dark:bg-gray-800 text-[11px] text-gray-600 dark:text-gray-300">
-                      Snapshot
+                  <span className="flex-1 min-w-0 py-1">
+                    <span className="block truncate text-sm text-gray-700 dark:text-gray-200" title={item.text}>
+                      {label}
                     </span>
-                  )}
+                    {/* The snapshot is kept as taken; the design may have
+                        changed since, while the queued turn waited. */}
+                    {item.image && (
+                      <span className="block truncate text-[11px] text-gray-500 dark:text-gray-400">
+                        Snapshot taken before the current reply
+                      </span>
+                    )}
+                  </span>
                   <button
                     type="button"
                     onClick={() => {
