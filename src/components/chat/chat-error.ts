@@ -14,6 +14,15 @@ export interface ChatErrorInfo {
 
 const MAX_RAW_LENGTH = 300;
 
+// 503 from the generation pool (src/lib/in-flight.ts).
+const BUSY = /overhang is busy/i;
+
+// True when the server turned the request away for lack of a free generation
+// slot: nothing ran, so the same request can simply be sent again.
+export function isBusyError(err: unknown): boolean {
+  return BUSY.test(extractErrorText(err));
+}
+
 // The server's `error` field when the body is `{"error": string}`, otherwise
 // the raw text. Accepts whatever the runtime stored as the status error.
 export function extractErrorText(err: unknown): string {
@@ -72,13 +81,18 @@ const RULES: { test: RegExp; info: ChatErrorInfo }[] = [
   },
   // 503 from the generation pool.
   {
-    test: /overhang is busy/i,
+    test: BUSY,
     info: { message: "Overhang is busy right now. Retry in a moment.", retryable: true },
   },
   // 503 kill switch, CAD engine down, or an overloaded upstream.
   {
     test: /temporarily (disabled|unavailable)|service unavailable|overloaded/i,
     info: { message: "Generation is temporarily unavailable. Try again in a few minutes.", retryable: true },
+  },
+  // The server's agent turn timeout, streamed as an error (generate-cad handler).
+  {
+    test: /aborted due to timeout/i,
+    info: { message: "This reply took too long and was stopped. Retry, or ask for a smaller change.", retryable: true },
   },
   // 413 body cap.
   {

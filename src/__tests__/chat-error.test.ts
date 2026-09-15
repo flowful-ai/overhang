@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { describeChatError, extractErrorText, findRetryTarget } from "@/components/chat/chat-error";
+import { describeChatError, extractErrorText, findRetryTarget, isBusyError } from "@/components/chat/chat-error";
 
 describe("extractErrorText", () => {
   it("parses the `error` field from a JSON body", () => {
@@ -24,6 +24,19 @@ describe("extractErrorText", () => {
 
 describe("describeChatError", () => {
   const body = (error: string) => new Error(JSON.stringify({ error }));
+
+  it("maps the server's turn timeout", () => {
+    const info = describeChatError(new Error("The operation was aborted due to timeout"));
+    expect(info).toEqual({
+      message: "This reply took too long and was stopped. Retry, or ask for a smaller change.",
+      retryable: true,
+    });
+  });
+
+  it("recognizes the busy 503", () => {
+    expect(isBusyError(body("Overhang is busy right now. Please try again in a moment."))).toBe(true);
+    expect(isBusyError(body("Too many requests. Please wait a moment."))).toBe(false);
+  });
 
   it("maps the rate limiter 429", () => {
     const info = describeChatError(body("Too many requests. Please wait a moment."));

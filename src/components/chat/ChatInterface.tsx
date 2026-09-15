@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback, useMemo, type MutableRefObject } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo, useSyncExternalStore, type MutableRefObject } from "react";
 import {
   AssistantRuntimeProvider,
   useThread,
@@ -23,7 +23,30 @@ import ViewerPane from "./ViewerPane";
 import CodeEditorModal from "./CodeEditorModal";
 import NewChatConfirmDialog from "./NewChatConfirmDialog";
 import { resetConversation } from "./reset-conversation";
+import {
+  MAX_QUEUED_MESSAGES,
+  createMessageQueueController,
+  outgoingText,
+  validateOutgoing,
+} from "./message-queue";
+import { createQueueDriver, type QueueThread } from "./queue-driver";
 import { loadWebSearchPreference, saveWebSearchPreference } from "./web-search-preference";
+
+// The thread as the message queue uses it. A queued item goes through the
+// same append as a typed message, so the transport applies the basis, image
+// stripping, model and web search at send time rather than when it was queued.
+function toQueueThread(
+  thread: { cancelRun: () => void; startRun: (config: { parentId: string }) => unknown },
+  append: QueueThread["append"],
+): QueueThread {
+  return {
+    append,
+    cancelRun: () => thread.cancelRun(),
+    startRun: (parentId) => {
+      void thread.startRun({ parentId });
+    },
+  };
+}
 
 export default function ChatInterface({ webSearchAvailable }: { webSearchAvailable: boolean }) {
   const [model, setModel] = useState<string>(MODELS[0].id);
@@ -201,8 +224,14 @@ function ChatInterfaceInner({
     setModelTabBadge(false);
   }, []);
 
+  // Messages sent while a turn runs (message-queue.ts), driven by the thread's
+  // running/idle edges (queue-driver.ts). In memory only.
+  const [queue] = useState(createMessageQueueController);
+  const queueState = useSyncExternalStore(queue.subscribe, queue.getState, queue.getState);
+  const [queueDriver] = useState(() => createQueueDriver(queue, isRunning));
+
   const handleStop = () => {
-    threadRuntime.cancelRun();
+    queueDriver.stop(toQueueThread(threadRuntime, appendUserMessage), threadRuntime.getState().messages);
   };
 
   // Resend the last user message after a failed turn. startRun with that
@@ -216,6 +245,7 @@ function ChatInterfaceInner({
   const performNewChatReset = () => {
     void resetConversation(threadRuntime, {
       isRunning: threadRuntime.getState().isRunning,
+      clearQueue: queueDriver.clear,
       resetLocalState: () => {
         session.reset();
         setPrompt("");
@@ -253,23 +283,63 @@ function ChatInterfaceInner({
     [threadRuntime],
   );
 
+  // A normal finish sends the next item; an error, busy server, unfinished
+  // reply or Stop pauses. The driver acts only on running/idle edges, so a
+  // re-run of this effect cannot send an item twice.
+  useEffect(() => {
+    queueDriver.observe(toQueueThread(threadRuntime, appendUserMessage), { isRunning, messages });
+  }, [queueDriver, threadRuntime, appendUserMessage, isRunning, messages]);
+
+  const tooLongMessage = `Prompt exceeds maximum length of ${APP_CONSTANTS.MAX_PROMPT_LENGTH.toLocaleString()} characters.`;
+
   // Local re-renders (isRendering) don't lock the composer, only an active
-  // AI turn does (UX audit #6).
+  // AI turn does (UX audit #6), and during a turn sending queues instead.
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (isRunning) return;
-    if (!prompt.trim() && !pendingImage) return;
 
-    if (prompt.length > APP_CONSTANTS.MAX_PROMPT_LENGTH) {
-      toast(`Prompt exceeds maximum length of ${APP_CONSTANTS.MAX_PROMPT_LENGTH.toLocaleString()} characters.`);
-      return;
+    if (isRunning) {
+      const { rejected } = queue.dispatch({
+        type: "enqueue",
+        text: prompt,
+        image: pendingImage,
+        maxLength: APP_CONSTANTS.MAX_PROMPT_LENGTH,
+      });
+      if (rejected === "too-long") toast(tooLongMessage);
+      if (rejected === "full") {
+        toast(`The queue is full (${MAX_QUEUED_MESSAGES} messages). Remove one or wait for the reply.`);
+      }
+      if (rejected) return;
+    } else {
+      const invalid = validateOutgoing(prompt, pendingImage, APP_CONSTANTS.MAX_PROMPT_LENGTH);
+      if (invalid === "too-long") toast(tooLongMessage);
+      if (invalid) return;
+      appendUserMessage(outgoingText(prompt, pendingImage), pendingImage);
     }
-
-    const userPrompt = prompt.trim() || (pendingImage ? "Analyze this snapshot" : "");
-    appendUserMessage(userPrompt, pendingImage);
 
     setPrompt("");
     setPendingImage(null);
+  };
+
+  // Edit moves a queued message back into the composer. Refused while a draft
+  // is in progress, so neither the draft nor the queued message is lost.
+  const handleEditQueued = (id: number): boolean => {
+    if (prompt.trim() || pendingImage) {
+      toast("Send or clear the message you are writing before editing a queued one.");
+      return false;
+    }
+    const { taken } = queue.dispatch({ type: "take", id });
+    if (!taken) return false;
+    setPrompt(taken.text);
+    setPendingImage(taken.image);
+    return true;
+  };
+
+  const handleRemoveQueued = (id: number) => {
+    queue.dispatch({ type: "remove", id });
+  };
+
+  const handleResumeQueue = () => {
+    queueDriver.resume(toQueueThread(threadRuntime, appendUserMessage), { isRunning, messages });
   };
 
   // One-click starter from the empty-state example chips: send immediately so
@@ -366,6 +436,10 @@ function ChatInterfaceInner({
             isRunning={isRunning}
             onSubmit={handleSubmit}
             onStop={handleStop}
+            queue={queueState}
+            onEditQueued={handleEditQueued}
+            onRemoveQueued={handleRemoveQueued}
+            onResumeQueue={handleResumeQueue}
           />
         </div>
 
