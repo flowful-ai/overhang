@@ -5,7 +5,7 @@ services:
     ports:
       # Host interface the app is published on. Loopback by default so other
       # machines can't hit port 3000 around the proxy. This does not protect a
-      # public proxy port: see README "Running behind a proxy". Set FRONTEND_BIND=0.0.0.0
+      # public proxy port: see docs/configuration.md#running-behind-a-proxy. Set FRONTEND_BIND=0.0.0.0
       # only if something outside this host must reach port 3000, and
       # firewall it to that proxy.
       - "${FRONTEND_BIND:-127.0.0.1}:3000:3000"
@@ -18,7 +18,7 @@ services:
       # Number of trusted reverse proxies that append to X-Forwarded-For. Falls
       # back to 1 only when TRUST_PROXY is absent from the environment and
       # .env; .env.example sets 0 for local installs. A CDN in front of a
-      # reverse proxy is 2. See README "Running behind a proxy".
+      # reverse proxy is 2. See docs/configuration.md#running-behind-a-proxy.
       - TRUST_PROXY=${TRUST_PROXY:-1}
       # Trust CF-Connecting-IP. Only when the origin accepts Cloudflare alone
       # (firewalled to Cloudflare IP ranges, or Authenticated Origin Pulls).
@@ -33,6 +33,8 @@ services:
       # Web search for the agent (OpenRouter). On when empty; off, 0 or false
       # disables it for everyone, whatever the users' toggle says.
       - WEB_SEARCH=${WEB_SEARCH:-}
+      # Kill switch: 1 makes /api/generate-cad return 503.
+      - EMERGENCY_DISABLE_GENERATION=${EMERGENCY_DISABLE_GENERATION:-}
     deploy:
       resources:
         limits:
@@ -69,6 +71,8 @@ services:
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://frontend:3000}
       - EXEC_TIMEOUT=${EXEC_TIMEOUT:-30}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Max simultaneous renders in the worker; over it the worker returns 503.
+      - CAD_MAX_CONCURRENT_RENDERS=${CAD_MAX_CONCURRENT_RENDERS:-4}
       - WORKER_SECRET=${WORKER_SECRET:?WORKER_SECRET must be set (generate with openssl rand -hex 32)}
     deploy:
       resources:
