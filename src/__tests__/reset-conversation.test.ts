@@ -66,4 +66,20 @@ describe("resetConversation", () => {
     expect(thread.reset.mock.invocationCallOrder[0]).toBeLessThan(resetLocalState.mock.invocationCallOrder[0]);
     expect(resetLocalState.mock.invocationCallOrder[0]).toBeLessThan(clearPersisted.mock.invocationCallOrder[0]);
   });
+
+  it("clears the message queue before cancelling the running turn", async () => {
+    const thread = fakeThread(["user"]);
+    const clearQueue = vi.fn();
+    const done = resetConversation(thread, {
+      isRunning: true,
+      clearQueue,
+      resetLocalState: vi.fn(),
+      clearPersisted: vi.fn(),
+    });
+    await vi.runAllTimersAsync();
+    await done;
+
+    expect(clearQueue).toHaveBeenCalledTimes(1);
+    expect(clearQueue.mock.invocationCallOrder[0]).toBeLessThan(thread.cancelRun.mock.invocationCallOrder[0]);
+  });
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback, useMemo, type MutableRefObject } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo, useSyncExternalStore, type MutableRefObject } from "react";
 import {
   AssistantRuntimeProvider,
   useThread,
@@ -23,6 +23,14 @@ import ViewerPane from "./ViewerPane";
 import CodeEditorModal from "./CodeEditorModal";
 import NewChatConfirmDialog from "./NewChatConfirmDialog";
 import { resetConversation } from "./reset-conversation";
+import {
+  MAX_QUEUED_MESSAGES,
+  createMessageQueueController,
+  outgoingText,
+  turnFailed,
+  validateOutgoing,
+  type QueuedMessage,
+} from "./message-queue";
 import { loadWebSearchPreference, saveWebSearchPreference } from "./web-search-preference";
 
 export default function ChatInterface({ webSearchAvailable }: { webSearchAvailable: boolean }) {
@@ -201,7 +209,13 @@ function ChatInterfaceInner({
     setModelTabBadge(false);
   }, []);
 
+  // Messages sent while a turn runs (message-queue.ts). In memory only.
+  const [queue] = useState(createMessageQueueController);
+  const queueState = useSyncExternalStore(queue.subscribe, queue.getState, queue.getState);
+
   const handleStop = () => {
+    // Recorded before cancelling so the turn's end pauses the queue.
+    queue.dispatch({ type: "stop" });
     threadRuntime.cancelRun();
   };
 
@@ -216,6 +230,7 @@ function ChatInterfaceInner({
   const performNewChatReset = () => {
     void resetConversation(threadRuntime, {
       isRunning: threadRuntime.getState().isRunning,
+      clearQueue: () => queue.dispatch({ type: "clear" }),
       resetLocalState: () => {
         session.reset();
         setPrompt("");
@@ -253,23 +268,80 @@ function ChatInterfaceInner({
     [threadRuntime],
   );
 
-  // Local re-renders (isRendering) don't lock the composer, only an active
-  // AI turn does (UX audit #6).
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (isRunning) return;
-    if (!prompt.trim() && !pendingImage) return;
+  // A queued item goes through the same append as a typed message, so the
+  // transport applies the basis, image stripping, model and web search at
+  // send time rather than when it was queued.
+  const sendQueued = useCallback(
+    (item: QueuedMessage) => appendUserMessage(outgoingText(item.text, item.image), item.image),
+    [appendUserMessage],
+  );
 
-    if (prompt.length > APP_CONSTANTS.MAX_PROMPT_LENGTH) {
-      toast(`Prompt exceeds maximum length of ${APP_CONSTANTS.MAX_PROMPT_LENGTH.toLocaleString()} characters.`);
+  // Drive the queue from the turn's edges. A normal finish sends the next
+  // item; an error or Stop pauses. The controller holds the state outside
+  // React, so a re-run of this effect cannot send an item twice.
+  const prevRunningRef = useRef(isRunning);
+  useEffect(() => {
+    if (prevRunningRef.current === isRunning) return;
+    prevRunningRef.current = isRunning;
+    if (isRunning) {
+      queue.dispatch({ type: "runStarted" });
       return;
     }
+    const { send } = queue.dispatch({ type: "runEnded", failed: turnFailed(messages) });
+    if (send) sendQueued(send);
+  }, [isRunning, messages, queue, sendQueued]);
 
-    const userPrompt = prompt.trim() || (pendingImage ? "Analyze this snapshot" : "");
-    appendUserMessage(userPrompt, pendingImage);
+  const tooLongMessage = `Prompt exceeds maximum length of ${APP_CONSTANTS.MAX_PROMPT_LENGTH.toLocaleString()} characters.`;
+
+  // Local re-renders (isRendering) don't lock the composer, only an active
+  // AI turn does (UX audit #6), and during a turn sending queues instead.
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (isRunning) {
+      const { rejected } = queue.dispatch({
+        type: "enqueue",
+        text: prompt,
+        image: pendingImage,
+        maxLength: APP_CONSTANTS.MAX_PROMPT_LENGTH,
+      });
+      if (rejected === "too-long") toast(tooLongMessage);
+      if (rejected === "full") {
+        toast(`The queue is full (${MAX_QUEUED_MESSAGES} messages). Remove one or wait for the reply.`);
+      }
+      if (rejected) return;
+    } else {
+      const invalid = validateOutgoing(prompt, pendingImage, APP_CONSTANTS.MAX_PROMPT_LENGTH);
+      if (invalid === "too-long") toast(tooLongMessage);
+      if (invalid) return;
+      appendUserMessage(outgoingText(prompt, pendingImage), pendingImage);
+    }
 
     setPrompt("");
     setPendingImage(null);
+  };
+
+  // Edit moves a queued message back into the composer. Refused while a draft
+  // is in progress, so neither the draft nor the queued message is lost.
+  const handleEditQueued = (id: number): boolean => {
+    if (prompt.trim() || pendingImage) {
+      toast("Send or clear the message you are writing before editing a queued one.");
+      return false;
+    }
+    const { taken } = queue.dispatch({ type: "take", id });
+    if (!taken) return false;
+    setPrompt(taken.text);
+    setPendingImage(taken.image);
+    return true;
+  };
+
+  const handleRemoveQueued = (id: number) => {
+    queue.dispatch({ type: "remove", id });
+  };
+
+  const handleResumeQueue = () => {
+    const { send } = queue.dispatch({ type: "resume", isRunning });
+    if (send) sendQueued(send);
   };
 
   // One-click starter from the empty-state example chips: send immediately so
@@ -366,6 +438,10 @@ function ChatInterfaceInner({
             isRunning={isRunning}
             onSubmit={handleSubmit}
             onStop={handleStop}
+            queue={queueState}
+            onEditQueued={handleEditQueued}
+            onRemoveQueued={handleRemoveQueued}
+            onResumeQueue={handleResumeQueue}
           />
         </div>
 

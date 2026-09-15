@@ -17,6 +17,9 @@ export interface ResettableThread {
 
 export interface ResetConversationOptions {
   isRunning: boolean;
+  // Drops messages queued behind the running turn. Runs first, so the turn
+  // ended by cancelRun() finds nothing to auto-send.
+  clearQueue?: () => void;
   // UI state tied to the conversation (design session, composer, tabs, model).
   resetLocalState: () => void;
   // Runs last, once the thread is empty, so no stale save can follow it.
@@ -28,7 +31,8 @@ export interface ResetConversationOptions {
 const defaultNextMacrotask = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 export async function resetConversation(thread: ResettableThread, options: ResetConversationOptions): Promise<void> {
-  const { isRunning, resetLocalState, clearPersisted, nextMacrotask = defaultNextMacrotask } = options;
+  const { isRunning, clearQueue, resetLocalState, clearPersisted, nextMacrotask = defaultNextMacrotask } = options;
+  clearQueue?.();
   if (isRunning) {
     thread.cancelRun();
     await nextMacrotask();
