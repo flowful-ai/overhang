@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request, Header
 from pydantic import BaseModel, field_validator
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from typing import Optional
 import ast
 import builtins
@@ -12,6 +13,7 @@ import tempfile
 import os
 import base64
 import secrets
+import signal
 import io
 import logging
 import re
@@ -19,9 +21,14 @@ import hashlib
 import traceback
 import asyncio
 import ctypes
+import multiprocessing
+import multiprocessing.forkserver
+import resource
 import threading
+import time
 from collections import OrderedDict
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 
 # Ensure module-level logger output is visible (uvicorn's default config does
 # not propagate application loggers by default).
@@ -31,7 +38,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+
+@asynccontextmanager
+async def _lifespan(_app):
+    # Start the render forkserver (~1.3 s: it imports cadquery) at boot instead
+    # of inside the first /health probe or render, which would otherwise pay
+    # it against its deadline (the frontend's /health ping gives up after 2 s).
+    # Runs in the API process only: the forkserver imports this module too,
+    # but never runs the app's lifespan.
+    try:
+        await asyncio.to_thread(multiprocessing.forkserver.ensure_running)
+    except Exception:
+        logger.exception("render forkserver failed to start; /health will report it")
+    yield
+
+
+app = FastAPI(lifespan=_lifespan)
 
 # CORS configuration - restrict in production by setting ALLOWED_ORIGINS env var
 # Example: ALLOWED_ORIGINS=https://myapp.com,https://www.myapp.com
@@ -49,14 +71,25 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
-# Execution timeout (in seconds)
+# Wall-clock limit (in seconds) for one render or export, exec + export
+# included. Enforced by SIGKILLing the render's child process.
 EXEC_TIMEOUT = int(os.environ.get("EXEC_TIMEOUT", "30"))
 
 # Shared secret with the Next.js frontend. Required on every /render and
 # /export-3mf request so that nothing else on the docker network (including a
 # sandbox-escaped Python process) can drive arbitrary CadQuery execution.
 # CORS is browser-only and doesn't help against curl-from-inside-the-network.
-WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
+# Popped, not read: the render forkserver is exec'd with the environment left
+# after this, so user code can't read the secret from /proc/self/environ.
+WORKER_SECRET = os.environ.pop("WORKER_SECRET", "")
+
+# Non-dumpable: /proc/<pid>/{environ,mem} of this process become root-owned,
+# so a render child (same uid) can't read the secret from the parent either.
+# Linux only; a no-op elsewhere.
+try:
+    ctypes.CDLL(None, use_errno=True).prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE
+except (OSError, AttributeError):
+    pass
 
 
 def require_worker_secret(provided: Optional[str]) -> None:
@@ -140,9 +173,10 @@ SAFE_BUILTINS = {
     "__name__": "__main__",
 }
 
-# Non-builtins globals shared with every exec. `__builtins__` is added per
-# call from a fresh copy of SAFE_BUILTINS so user code that mutates it (e.g.
-# `__builtins__.clear()`) can only poison its own request, not later ones.
+# Non-builtins globals for every exec. `__builtins__` is added per call from a
+# fresh copy of SAFE_BUILTINS. The module objects themselves are shared, so
+# tampering (`math.pi = 3`) lasts for the rest of the process; that is safe
+# only because every render runs in a fresh child process (see _run_in_child).
 EXEC_BASE_GLOBALS = {
     "cq": cq,
     "cadquery": cq,
@@ -155,58 +189,6 @@ EXEC_BASE_GLOBALS = {
 def make_exec_globals() -> dict:
     return {"__builtins__": dict(SAFE_BUILTINS), **EXEC_BASE_GLOBALS}
 
-
-class ExecTimeoutError(Exception):
-    pass
-
-
-def _async_raise(thread_id: int, exc_type: Optional[type]) -> None:
-    """Asynchronously raise `exc_type` in the thread with the given id (or, if
-    None, clear any pending async exception on it). Uses CPython's
-    PyThreadState_SetAsyncExc; the exception is delivered at the next bytecode
-    boundary in that thread, so it interrupts pure-Python loops but not a
-    blocking C call already in progress (the previous SIGALRM timeout had the
-    same limitation)."""
-    arg = ctypes.py_object(exc_type) if exc_type is not None else None
-    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(thread_id), arg)
-    if res > 1:
-        # Affected more than one thread state — undo to avoid corrupting others.
-        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(thread_id), None)
-
-
-@contextmanager
-def timeout(seconds: int):
-    """Interrupt the calling thread if the wrapped block runs longer than
-    `seconds`. Unlike the previous SIGALRM implementation this works on any
-    thread, so the request handlers can offload exec() onto a worker thread
-    (via asyncio.to_thread) and keep the event loop responsive.
-    """
-    target_tid = threading.get_ident()
-    lock = threading.Lock()
-    finished = False
-
-    def fire():
-        with lock:
-            if not finished:
-                _async_raise(target_tid, ExecTimeoutError)
-
-    timer = threading.Timer(seconds, fire)
-    timer.start()
-    try:
-        yield
-    except ExecTimeoutError:
-        raise ExecTimeoutError(f"Code execution timed out after {seconds} seconds")
-    finally:
-        # Take the lock FIRST and clear before anything else: if fire() already
-        # scheduled an async exception (under the lock) but it hasn't landed, the
-        # lock.acquire() here blocks in C (not interruptible by the async exc),
-        # and clearing as the first statement minimizes the window in which a
-        # stray ExecTimeoutError could surface in unrelated later code on this
-        # (pooled) worker thread.
-        with lock:
-            finished = True
-            _async_raise(target_tid, None)
-        timer.cancel()
 
 MAX_CODE_LENGTH = 50_000
 
@@ -539,12 +521,11 @@ def exec_user_code(code: str) -> tuple[object, str]:
     Raises on failure. Used by both /render and /export-3mf.
 
     User print() output is captured by injecting a buffer-bound `print` into
-    this call's sandbox builtins, NOT via contextlib.redirect_stdout. Redirect
-    swaps the *process-global* sys.stdout, which is unsafe now that execs run
-    concurrently on worker threads (asyncio.to_thread): two requests would
-    cross-contaminate each other's console output and race the restore. A
-    per-call print keeps each request's output isolated. Sandboxed code has no
-    access to `sys`, so replacing `print` captures everything it can emit.
+    this call's sandbox builtins, NOT via contextlib.redirect_stdout, which
+    swaps the process-global sys.stdout. A per-call print scopes the output to
+    this exec without touching global state, wherever it runs (a render child,
+    or in-process in the tests). Sandboxed code has no access to `sys`, so
+    replacing `print` captures everything it can emit.
     """
     console_buf = io.StringIO()
 
@@ -564,9 +545,9 @@ def exec_user_code(code: str) -> tuple[object, str]:
     # comprehension bodies and function bodies compile their reads as GLOBAL
     # lookups, so `[w * i for i in range(n)]` or a helper function reading a
     # top-level parameter dies with NameError. The dict is per-call, so user
-    # code still can't poison later requests.
-    with timeout(EXEC_TIMEOUT):
-        exec(code, exec_globals)
+    # code still can't poison later requests. No timeout here: the parent
+    # SIGKILLs the whole child process at the deadline.
+    exec(code, exec_globals)
 
     if "result" not in exec_globals:
         raise ValueError("The code must define a 'result' variable containing the CadQuery object.")
@@ -602,26 +583,54 @@ def export_to_bytes(result: object, export_type: str, suffix: str) -> bytes:
         os.unlink(tmp_path)
 
 
-# exec() + tessellation + export are CPU-bound and synchronous. Running them
-# inline in an async handler would block the uvicorn event loop for the whole
-# render, so /health and any concurrent request would hang behind it. We offload
-# the whole pipeline to a worker thread (to_thread) and bound the wait with
-# wait_for, which keeps the loop responsive and gives a hard ceiling even when
-# the in-thread timeout can't interrupt a long-running C call.
-WAIT_TIMEOUT = EXEC_TIMEOUT + 10
+# --- Process isolation ---
+# exec() + tessellation + export run in a child process per request, never in
+# this one. OCC holds the GIL through long C++ calls (booleans, fillets,
+# tessellation), so on a thread it froze the event loop, /health, and every
+# timeout, and a hung render held its slot forever. A process can be SIGKILLed
+# at the deadline whatever it is doing, and its slot is freed when it's reaped.
+#
+# Children come from a forkserver that preloads this module (cadquery, OCP,
+# numpy already imported), so a request pays a fork, not a ~1s import. Each
+# child runs exactly one pipeline and exits: the forkserver never runs user
+# code, so nothing a script tampers with (math.pi, cq.Workplane methods,
+# module caches) can reach the next request.
+_mp = multiprocessing.get_context("forkserver")
+# "__main__" too: otherwise every child re-runs the entry script (uvicorn's
+# CLI) before it can unpickle its task.
+_mp.set_forkserver_preload(["__main__", __name__])
 
-# Bound on concurrent pipeline executions. The in-thread timeout cannot
-# interrupt a blocking C call (OCC tessellation/boolean), so on the wait_for
-# path the worker thread is abandoned but keeps running until that C call
-# returns -- a leaked thread. We count a slot as occupied from submit until the
-# thread *actually* finishes (not until wait_for gives up), so a handful of hung
-# renders can't exhaust an unbounded pool: once MAX_CONCURRENT_RENDERS slots are
-# taken the worker sheds load with 503 and stays responsive instead of silently
-# queueing forever. The complete fix (hard-killing a hung render) needs process
-# isolation; this bounds and surfaces the blast radius in the meantime.
+# Environment for the forkserver, which is a fresh interpreter, so these apply
+# there even though numpy and OCC are already loaded here. RLIMIT_AS counts
+# reserved address space, and both runtimes reserve per thread they start:
+# - glibc gives each allocating thread its own 64 MB malloc arena. OCC runs
+#   booleans on a thread per host core, and 16 arenas blow a 1 GB cap within
+#   a 50-cut loop (segfault). Two arenas are plenty for one render.
+# - numpy's OpenMP BLAS starts a thread per host core on the first matrix op;
+#   under the cap that fails and aborts the child. Renders already run in
+#   parallel processes, so single-threaded BLAS also avoids oversubscription.
+os.environ["MALLOC_ARENA_MAX"] = "2"
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ[_var] = "1"
+
+# Bound on concurrent children. Over it the worker sheds load with 503 instead
+# of queueing. A slot is held until its child has exited (or been killed).
 MAX_CONCURRENT_RENDERS = int(os.environ.get("CAD_MAX_CONCURRENT_RENDERS", "4"))
 _inflight_lock = threading.Lock()
 _inflight = 0
+
+# Extra address space (MB) a child may map beyond what the preloaded forkserver
+# image already has. RLIMIT_AS counts virtual memory, and importing OCP alone
+# maps ~2.7 GB (mostly untouched reservations, ~370 MB resident), so an
+# absolute cap would be meaningless. The container memory limit still bounds
+# the sum over concurrent children.
+RENDER_MEMORY_MB = int(os.environ.get("CAD_RENDER_MEMORY_MB", "1024"))
+
+# One thread per slot (+1 for the /health probe) waits on its child. These
+# threads only block on a pipe, so they never hold the GIL for long.
+_render_executor = ThreadPoolExecutor(
+    max_workers=MAX_CONCURRENT_RENDERS + 1, thread_name_prefix="render-wait"
+)
 
 
 class PipelineError(Exception):
@@ -731,9 +740,98 @@ def _error_detail(e: Exception) -> str:
     return error_msg
 
 
+def _apply_child_limits(memory_mb: int, cpu_seconds: int) -> None:
+    """Resource caps for a render child. RLIMIT_AS is relative to what the
+    preloaded image already maps (see RENDER_MEMORY_MB): past it, allocations
+    fail with MemoryError (or std::bad_alloc in OCC). RLIMIT_CPU is a backstop
+    for a child that outlives the parent's deadline kill (e.g. the parent
+    died): SIGXCPU at the soft limit, SIGKILL one second later. CPU time
+    sums over threads (OCC booleans are multi-threaded), hence the core
+    multiplier.
+
+    Linux only for the memory cap: without /proc (macOS dev runs) or where
+    RLIMIT_AS can't be lowered, the render runs without it rather than
+    failing every request."""
+    try:
+        with open("/proc/self/statm") as f:
+            mapped = int(f.read().split()[0]) * resource.getpagesize()
+        limit = mapped + memory_mb * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+    except (OSError, ValueError):
+        pass
+    resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds + 1))
+
+
+def _child_main(conn, pipeline, code: str, memory_mb: int, cpu_seconds: int) -> None:
+    """Entry point of a render child. Sends exactly one message: ("ok", payload)
+    or ("error", detail, traceback). The error detail is formatted here because
+    tracebacks (needed for the user's line number) don't pickle.
+
+    BaseException, not Exception: a KeyboardInterrupt (SIGINT to the process
+    group in a dev terminal) or SystemExit raised from library code must be
+    reported as an error, not surface as a silent "crashed" (out of memory)."""
+    try:
+        _apply_child_limits(memory_mb, cpu_seconds)
+        conn.send(("ok", pipeline(code)))
+    except BaseException as e:
+        conn.send(("error", _error_detail(e), traceback.format_exc()))
+    finally:
+        conn.close()
+
+
+def _noop_pipeline(code: str) -> dict:
+    return {}
+
+
+def _run_in_child(pipeline, code: str, timeout_s: float) -> tuple:
+    """Run `pipeline(code)` in a fresh child and wait at most `timeout_s`.
+    Blocking; call it off the event loop. Always reaps the child (SIGKILL if
+    still running) before returning, so the caller's slot can be freed.
+
+    Returns ("ok", payload), ("error", detail, traceback), ("timeout",), or
+    ("crashed", exitcode) when the child died without reporting (OOM kill,
+    OCC abort on a failed allocation, segfault)."""
+    recv_conn, send_conn = _mp.Pipe(duplex=False)
+    proc = _mp.Process(
+        target=_child_main,
+        args=(send_conn, pipeline, code, RENDER_MEMORY_MB, (int(timeout_s) + 5) * (os.cpu_count() or 1)),
+        daemon=True,
+    )
+    try:
+        proc.start()
+        send_conn.close()
+        if not recv_conn.poll(timeout_s):
+            return ("timeout",)
+        try:
+            return recv_conn.recv()
+        except EOFError:
+            proc.join()
+            if proc.exitcode == -signal.SIGXCPU:
+                return ("timeout",)
+            return ("crashed", proc.exitcode)
+    finally:
+        send_conn.close()
+        recv_conn.close()
+        if proc.pid is not None:
+            proc.kill()
+            proc.join()
+            proc.close()
+
+
+def _timeout_detail() -> str:
+    # Starts with the exact message the frontend has always received. No "/"
+    # in the hint: sanitize_error-style path stripping would mangle it.
+    return (
+        f"Code execution timed out. Renders are limited to {EXEC_TIMEOUT} seconds. "
+        "Common causes: many boolean operations (.union() or .cut()) inside a loop, "
+        "and fillets or chamfers on a complex body. Combine shapes into one boolean, "
+        "or fillet simpler geometry before the booleans."
+    )
+
+
 async def _execute_pipeline(pipeline, code: str, req_id: str, label: str) -> dict:
-    """Run a render/export pipeline on a worker thread with bounded concurrency
-    and a hard wall-clock ceiling. Raises HTTPException(400/503) on failure;
+    """Run a render/export pipeline in a child process with bounded concurrency
+    and a hard wall-clock deadline. Raises HTTPException(400/503) on failure;
     returns the pipeline's payload dict on success.
 
     Shared by /render and /export-3mf so the concurrency bound, timeout mapping,
@@ -746,31 +844,48 @@ async def _execute_pipeline(pipeline, code: str, req_id: str, label: str) -> dic
             raise HTTPException(status_code=503, detail="Worker is busy. Please retry shortly.")
         _inflight += 1
 
-    future = asyncio.ensure_future(asyncio.to_thread(pipeline, code))
+    loop = asyncio.get_running_loop()
+    future = loop.run_in_executor(_render_executor, _run_in_child, pipeline, code, EXEC_TIMEOUT)
 
-    def _release(_):
-        # Decrement only when the thread truly finishes, even if wait_for has
-        # already abandoned it, so a leaked (hung-C-call) thread keeps holding
-        # its slot and counts toward the concurrency bound.
+    def _release(fut):
+        # Release when the waiting thread returns, i.e. once the child is
+        # reaped, even if this request was cancelled (client disconnect) first.
         global _inflight
         with _inflight_lock:
             _inflight -= 1
+        # Mark a start failure retrieved: if this request was cancelled,
+        # nothing else awaits `fut`, and asyncio would log "Future exception
+        # was never retrieved" at GC.
+        if not fut.cancelled():
+            fut.exception()
 
     future.add_done_callback(_release)
 
+    # shield: a cancelled request must not cancel the wait (the child runs to
+    # its deadline and still holds the slot until then).
     try:
-        # shield so a wait_for timeout cancels only our wait, not the underlying
-        # thread future (a thread can't be cancelled mid-run anyway).
-        return await asyncio.wait_for(asyncio.shield(future), timeout=WAIT_TIMEOUT)
-    except (asyncio.TimeoutError, ExecTimeoutError):
-        # asyncio.TimeoutError: wait_for ceiling hit (C call ignored the in-thread
-        # timeout). ExecTimeoutError: the in-thread timeout interrupted a pure-Python
-        # loop. Both are timeouts -> the same clean message.
-        logger.error("[%s] %s timed out after %ds", req_id, label, WAIT_TIMEOUT)
-        raise HTTPException(status_code=400, detail="Code execution timed out.")
-    except Exception as e:
-        logger.error("[%s] %s failed: %s", req_id, label, traceback.format_exc())
-        raise HTTPException(status_code=400, detail=_error_detail(e))
+        outcome = await asyncio.shield(future)
+    except Exception:
+        # Could not start a child at all (forkserver gone, fork failed).
+        logger.error("[%s] %s could not start: %s", req_id, label, traceback.format_exc())
+        raise HTTPException(status_code=503, detail="Worker is unavailable. Please retry shortly.")
+    status = outcome[0]
+    if status == "ok":
+        return outcome[1]
+    if status == "timeout":
+        logger.error("[%s] %s timed out after %ds, child killed", req_id, label, EXEC_TIMEOUT)
+        raise HTTPException(status_code=400, detail=_timeout_detail())
+    if status == "crashed":
+        logger.error("[%s] %s child died (exit code %s)", req_id, label, outcome[1])
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Rendering crashed, most likely by running out of memory "
+                f"(limit {RENDER_MEMORY_MB} MB). Simplify the model or reduce repeated features."
+            ),
+        )
+    logger.error("[%s] %s failed: %s", req_id, label, outcome[2])
+    raise HTTPException(status_code=400, detail=outcome[1])
 
 
 @app.post("/render", response_model=RenderResponse)
@@ -815,6 +930,45 @@ async def export_3mf(
     return payload
 
 
+# /health forks a no-op child, so it fails when renders can't actually run
+# (forkserver dead, fork or memory exhausted), not just when this process is up.
+# One probe at a time, reused for a few seconds, so polling can't fork-bomb.
+# The timeout stays under the compose healthcheck's 5 s. The forkserver is
+# started at boot (_lifespan), so a probe normally costs one fork (~18 ms).
+HEALTH_PROBE_TIMEOUT = 4
+_HEALTH_CACHE_SECONDS = 5.0
+_health_lock = asyncio.Lock()
+_health_last: Optional[tuple[float, bool]] = None
+
+
+async def _health_ok() -> bool:
+    global _health_last
+    # While a probe runs, answer from the previous one instead of queueing
+    # behind it: the frontend's ping gives up after 2 s, and a queued caller
+    # would wait out the whole probe first.
+    if _health_lock.locked() and _health_last is not None:
+        return _health_last[1]
+    async with _health_lock:
+        if _health_last is None or time.monotonic() - _health_last[0] > _HEALTH_CACHE_SECONDS:
+            loop = asyncio.get_running_loop()
+            try:
+                outcome = await loop.run_in_executor(
+                    _render_executor, _run_in_child, _noop_pipeline, "", HEALTH_PROBE_TIMEOUT
+                )
+            except Exception as e:
+                outcome = ("unstartable", repr(e))
+            if outcome[0] != "ok":
+                logger.error("health probe failed: %s", outcome[:2])
+            _health_last = (time.monotonic(), outcome[0] == "ok")
+        return _health_last[1]
+
+
 @app.get("/health")
-def health():
-    return {"status": "ok"}
+async def health():
+    ok = await _health_ok()
+    body = {
+        "status": "ok" if ok else "unavailable",
+        "inflight": _inflight,
+        "capacity": MAX_CONCURRENT_RENDERS,
+    }
+    return JSONResponse(body, status_code=200 if ok else 503)
