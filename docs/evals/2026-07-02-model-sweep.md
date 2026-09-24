@@ -6,7 +6,8 @@
 Question: which OpenRouter models maximize quality/cost for Overhang?
 Method: the 8-case eval suite (`npm run eval`), one full run per model,
 production-identical settings (5-step cap, temperature 0.2, 8k output tokens,
-120s per-turn timeout). Total sweep cost ≈ $0.75.
+120s per-turn timeout; OpenRouter silently drops temperature for
+claude-sonnet-5, which does not accept it, so that run used its default). Total sweep cost ≈ $0.75.
 
 ## Ranking
 

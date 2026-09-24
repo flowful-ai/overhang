@@ -94,7 +94,7 @@ const RULES: { test: RegExp; info: ChatErrorInfo }[] = [
     test: /aborted due to timeout/i,
     info: { message: "This reply took too long and was stopped. Retry, or ask for a smaller change.", retryable: true },
   },
-  // 413 body cap.
+  // 413 body cap, or the generate-cad model-input cap.
   {
     test: /too large/i,
     info: { message: "This conversation is too large to send. Start a new chat to continue.", retryable: false },

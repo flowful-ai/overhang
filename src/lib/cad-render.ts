@@ -44,34 +44,70 @@ export type RenderWorker = (
   options?: WorkerCallOptions,
 ) => Promise<WorkerRenderResult>;
 
+// Backoff before each retry of a worker 503 (load shed: every render slot is
+// taken). The busy state usually clears within a render or two; past that the
+// failure goes back to the caller marked transient.
+const BUSY_RETRY_DELAYS_MS = [500, 1500];
+
+export const WORKER_BUSY_ERROR =
+  "CAD worker is busy (transient infrastructure condition, not a problem with the code). Resend the same code unchanged.";
+
+/** Resolves after `ms`, or early when `signal` aborts (the next worker call then fails fast on it). */
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
 export async function renderCad(
   code: string,
   requestId: string,
   // The eval replay path substitutes recorded worker responses; production uses
   // the live worker. `signal` cancels the worker call when the caller gives up.
-  opts?: { callWorker?: RenderWorker; signal?: AbortSignal },
+  // `busyRetryDelaysMs` overrides the 503 backoff (tests).
+  opts?: { callWorker?: RenderWorker; signal?: AbortSignal; busyRetryDelaysMs?: readonly number[] },
 ): Promise<CadRenderResult> {
   const callWorker = opts?.callWorker ?? callCadWorker;
+  const delays = opts?.busyRetryDelaysMs ?? BUSY_RETRY_DELAYS_MS;
   const cleaned = normalizePunctuation(code);
-  try {
-    const data = await callWorker(cleaned, requestId, { signal: opts?.signal });
-    return {
-      success: true,
-      code: cleaned,
-      stlBase64: data.stl_base64,
-      warnings: data.warnings ?? [],
-      metrics: data.metrics,
-    };
-  } catch (e: unknown) {
-    if (process.env.NODE_ENV === "development") {
-      console.error(`[${requestId}] cad-worker failed:`, cleaned.slice(0, 500));
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const data = await callWorker(cleaned, requestId, { signal: opts?.signal });
+      return {
+        success: true,
+        code: cleaned,
+        stlBase64: data.stl_base64,
+        warnings: data.warnings ?? [],
+        metrics: data.metrics,
+      };
+    } catch (e: unknown) {
+      const workerStatus = (e as { workerStatus?: unknown })?.workerStatus;
+      // A 503 says nothing about the code. Returned as a plain failure, the
+      // model "fixes" working code and burns steps, so retry it here first.
+      if (workerStatus === 503) {
+        if (attempt < delays.length && !opts?.signal?.aborted) {
+          await pause(delays[attempt], opts?.signal);
+          continue;
+        }
+        console.warn(`[${requestId}] cad-worker still busy after ${attempt + 1} attempts`);
+        return { success: false, code: cleaned, error: WORKER_BUSY_ERROR, workerStatus };
+      }
+      if (process.env.NODE_ENV === "development") {
+        console.error(`[${requestId}] cad-worker failed:`, cleaned.slice(0, 500));
+      }
+      return {
+        success: false,
+        code: cleaned,
+        error: toSanitizedMessage(e),
+        ...(typeof workerStatus === "number" ? { workerStatus } : {}),
+      };
     }
-    const workerStatus = (e as { workerStatus?: unknown })?.workerStatus;
-    return {
-      success: false,
-      code: cleaned,
-      error: toSanitizedMessage(e),
-      ...(typeof workerStatus === "number" ? { workerStatus } : {}),
-    };
   }
 }

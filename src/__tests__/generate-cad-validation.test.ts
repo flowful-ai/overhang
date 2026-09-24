@@ -2,12 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import type { LanguageModelV3CallOptions, LanguageModelV3StreamPart } from "@ai-sdk/provider";
 import type { UIMessage } from "ai";
-import { createGenerateCadPost } from "@/app/api/generate-cad/handler";
+import { createGenerateCadPost, MAX_MODEL_INPUT_CHARS } from "@/app/api/generate-cad/handler";
 import { forNextTurn } from "@/components/chat/next-turn";
 import { MAX_AGENT_STEPS } from "@/components/chat/constants";
 import { GENERATION_POOL, acquirePoolSlot, releasePoolSlot } from "@/lib/in-flight";
 import { APP_CONSTANTS } from "@/lib/utils";
 import { OMITTED_SNAPSHOT_TEXT } from "@/lib/constants";
+import { SAME_CODE_AS_INPUT } from "@/lib/cad-agent";
 
 // The real handler, driven through injected adapters: a mock model and a fake
 // CAD worker (no module mocks).
@@ -250,7 +251,7 @@ describe("generate-cad request validation", () => {
     expect((await res.json()).error).toBe("Image attachment too large (max 2 MB).");
   });
 
-  it("drops oversized and remote images from older turns with one placeholder, instead of rejecting the chat", async () => {
+  it("drops older-turn images (oversized, remote or not) with one placeholder each, instead of rejecting the chat", async () => {
     const doStream = textOnly();
     mockModel = new MockLanguageModelV3({ doStream });
     const res = await post({
@@ -271,8 +272,70 @@ describe("generate-cad request validation", () => {
     const prompt = JSON.stringify(doStream.mock.calls[0][0].prompt);
     expect(prompt).not.toContain(BIG_B64.slice(0, 64));
     expect(prompt).not.toContain("example.com");
-    expect(prompt.split(OMITTED_SNAPSHOT_TEXT)).toHaveLength(2); // exactly one placeholder
-    expect(prompt).toContain("/9j/4AAQ"); // the small older image is kept
+    // Only the newest user message keeps images (the client's policy, enforced
+    // here too), so the small older snapshot goes as well.
+    expect(prompt).not.toContain("/9j/4AAQ");
+    expect(prompt.split(OMITTED_SNAPSHOT_TEXT)).toHaveLength(3); // one placeholder per older image message
+  });
+
+  it("keeps the images of the newest user message", async () => {
+    const doStream = textOnly();
+    mockModel = new MockLanguageModelV3({ doStream });
+    const res = await post({
+      messages: [
+        user("old snapshot", [{ type: "file", mediaType: "image/png", url: SMALL_JPEG.replace("2w==", "AA==") }]),
+        { id: "a1", role: "assistant", parts: [{ type: "text", text: "Seen." }] },
+        user("new snapshot", [{ type: "file", mediaType: "image/png", url: SMALL_JPEG }]),
+      ],
+    });
+    expect(res.status).toBe(200);
+    await drain(res);
+    const prompt = JSON.stringify(doStream.mock.calls[0][0].prompt);
+    expect(prompt).toContain("2w==");
+    expect(prompt).not.toContain("AA==");
+  });
+
+  it("strips the STL from history the client failed to strip, and dedupes the echoed code", async () => {
+    const doStream = textOnly();
+    mockModel = new MockLanguageModelV3({ doStream });
+    const edited = CUBE.replace("20)", "40)");
+    const toolPart = (id: string, code: string) => ({
+      type: "tool-runCadquery",
+      toolCallId: id,
+      state: "output-available",
+      input: { code: CUBE },
+      output: { success: true, code, stlBase64: "STL_FROM_HISTORY", warnings: [], summary: "Render OK." },
+    });
+    const res = await post({
+      messages: [
+        user("cube"),
+        { id: "a1", role: "assistant", parts: [{ type: "step-start" }, toolPart("c1", CUBE), toolPart("c2", edited)] },
+        user("taller"),
+      ],
+    });
+    expect(res.status).toBe(200);
+    await drain(res);
+
+    const prompt = JSON.stringify(doStream.mock.calls[0][0].prompt);
+    expect(prompt).not.toContain("STL_FROM_HISTORY");
+    expect(prompt).toContain("Render OK.");
+    expect(prompt).toContain(JSON.stringify(SAME_CODE_AS_INPUT)); // c1's code equals its input
+    expect(prompt).toContain(JSON.stringify(edited).slice(1, -1)); // c2's user-edited code is kept
+  });
+
+  it("rejects a conversation over the model-input cap with 413, without calling the model", async () => {
+    const doStream = textOnly();
+    mockModel = new MockLanguageModelV3({ doStream });
+    const res = await post({
+      messages: [
+        user("cube"),
+        { id: "a1", role: "assistant", parts: [{ type: "text", text: "a".repeat(MAX_MODEL_INPUT_CHARS) }] },
+        user("again"),
+      ],
+    });
+    expect(res.status).toBe(413);
+    expect((await res.json()).error).toMatch(/too large for the model/);
+    expect(doStream).not.toHaveBeenCalled();
   });
 
   it("does not count the omitted-snapshot placeholder toward the prompt length limit", async () => {

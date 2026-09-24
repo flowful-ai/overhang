@@ -1,6 +1,6 @@
 # Configuration
 
-Overhang reads its settings from `.env`, which `setup.sh` creates from `.env.example`. Restart with `docker compose up --build --remove-orphans` after a change.
+Overhang reads its settings from `.env`, which `setup.sh` creates from `.env.example`. Restart with `docker compose up -d --build --remove-orphans` after a change.
 
 ## Environment variables
 

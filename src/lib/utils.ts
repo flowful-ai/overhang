@@ -62,11 +62,15 @@ export const CodeBodySchema = z.object({
 //   120s timeout first. Search may not be the cause (their no-search eval
 //   turns already take 80-93s, and no no-search run of that prompt was done).
 // - Gemini 3 Flash, native: the tool call arrived but no search was reported.
+//
+// temperature: whether OpenRouter lists `temperature` in the model's
+// supported_parameters (GET /api/v1/models, checked 2026-09-24). Where it is
+// not listed, OpenRouter silently drops it, so the agent turn doesn't send it.
 export const MODELS = [
-  { id: "openai/gpt-5.6-luna", name: "GPT-5.6 Luna", webSearch: "native" },
-  { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5", webSearch: false },
-  { id: "google/gemini-3-flash-preview", name: "Gemini 3 Flash", webSearch: false },
-  { id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", webSearch: false },
+  { id: "openai/gpt-5.6-luna", name: "GPT-5.6 Luna", webSearch: "native", temperature: false },
+  { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5", webSearch: false, temperature: false },
+  { id: "google/gemini-3-flash-preview", name: "Gemini 3 Flash", webSearch: false, temperature: true },
+  { id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", webSearch: false, temperature: true },
 ] as const;
 
 export const ALLOWED_MODEL_IDS = MODELS.map(m => m.id) as string[];
@@ -74,6 +78,11 @@ export const ALLOWED_MODEL_IDS = MODELS.map(m => m.id) as string[];
 /** Whether web search is enabled for this model id (see MODELS). Unlisted ids: no. */
 export function modelSupportsWebSearch(modelId: string): boolean {
   return MODELS.find((m) => m.id === modelId)?.webSearch === "native";
+}
+
+/** Whether the model accepts a temperature (see MODELS). Unlisted ids (eval candidates): yes. */
+export function modelSupportsTemperature(modelId: string): boolean {
+  return MODELS.find((m) => m.id === modelId)?.temperature ?? true;
 }
 
 /** The requested model when it is on the allowlist, otherwise the default (first) model. */

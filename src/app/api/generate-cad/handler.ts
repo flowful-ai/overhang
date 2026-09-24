@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { convertToModelMessages, createUIMessageStreamResponse, type ModelMessage, type UIMessageChunk } from "ai";
+import { createUIMessageStreamResponse, type ModelMessage, type UIMessageChunk } from "ai";
 import type { LanguageModelV3 } from "@ai-sdk/provider";
 import { z } from "zod";
 import { APP_CONSTANTS } from "@/lib/utils";
@@ -7,9 +7,11 @@ import { OMITTED_SNAPSHOT_TEXT } from "@/lib/constants";
 import { withRoute } from "@/lib/api-handler";
 import { sanitizeError, toSanitizedMessage } from "@/lib/sanitize-error";
 import { withGenerationLease } from "@/lib/in-flight";
+import { stripOlderImages } from "@/components/chat/strip-images";
 import {
   AGENT_TURN_TIMEOUT_MS,
   runAgentTurn,
+  toAgentModelMessages,
   validateAgentUIMessages,
   type AgentUIMessage,
   type AgentWorker,
@@ -33,6 +35,12 @@ const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 // Hard cap on inbound history. The model's context window is the real
 // constraint; this is a defense-in-depth bound to reject malicious payloads.
 const MAX_HISTORY_MESSAGES = 200;
+// Ceiling on the model-bound conversation, in characters (text, tool calls and
+// tool results after the STL is stripped; the one image left is capped by
+// MAX_IMAGE_BYTES instead). The body cap alone would let ~10 MB of text through
+// to a paid model call. 300k characters is ~75k tokens: dozens of turns with
+// full scripts, well under every allowed model's context window.
+export const MAX_MODEL_INPUT_CHARS = 300_000;
 
 // First pass: shape and role only. The full UIMessage structure is checked by
 // the AI SDK's validator in the handler. Only user and assistant turns are
@@ -99,6 +107,16 @@ function dropUnusableHistoryImages(messages: AgentUIMessage[]): AgentUIMessage[]
     }
     return { ...m, parts };
   });
+}
+
+// Characters the conversation sends to the model, images excluded.
+function modelInputChars(messages: ModelMessage[]): number {
+  let n = 0;
+  for (const m of messages) {
+    if (typeof m.content === "string") n += m.content.length;
+    else for (const p of m.content) n += p.type === "file" || p.type === "image" ? 0 : JSON.stringify(p).length;
+  }
+  return n;
 }
 
 // Content rules the SDK validator doesn't know about. Returns an error message,
@@ -169,7 +187,10 @@ export function createGenerateCadPost(deps: GenerateCadDeps) {
         console.warn(`[${requestId}] rejected message history: ${validated.error.message.slice(0, 500)}`);
         return bad("Invalid message format.");
       }
-      const uiMessages = dropUnusableHistoryImages(validated.data);
+      // Same image policy as the client (only the newest user message keeps its
+      // images), enforced here too so an older or modified client can't send
+      // every snapshot of a long chat to the model.
+      const uiMessages = stripOlderImages(dropUnusableHistoryImages(validated.data));
       const limitError = checkContentLimits(uiMessages);
       if (limitError) return bad(limitError);
 
@@ -177,17 +198,25 @@ export function createGenerateCadPost(deps: GenerateCadDeps) {
       // (a failure is the client's 400), so it must not hold a slot.
       let modelMessages: ModelMessage[];
       try {
-        // A turn stopped mid tool call leaves tool parts with no result
-        // (input-streaming, or input-available with no output). Sent as-is,
-        // providers reject a tool call without its result, so drop them. Data
-        // parts are ignored by the converter.
-        modelMessages = await convertToModelMessages(uiMessages, { ignoreIncompleteToolCalls: true });
+        // Strips the STL from prior tool results and drops incomplete tool
+        // calls (see toAgentModelMessages). Data parts are ignored.
+        modelMessages = await toAgentModelMessages(uiMessages);
       } catch (e: unknown) {
         // Preserve the 400 contract: malformed UIMessages are a client error,
         // not a server fault that withRoute's catch-all should turn into a 500.
         // Same stable text as the validator path; the detail goes to the log.
         console.warn(`[${requestId}] message conversion failed: ${e instanceof Error ? e.message : String(e)}`);
         return bad("Invalid message format.");
+      }
+      const inputChars = modelInputChars(modelMessages);
+      if (inputChars > MAX_MODEL_INPUT_CHARS) {
+        console.warn(`[${requestId}] rejected oversized conversation: ${inputChars} model-bound characters`);
+        return NextResponse.json(
+          {
+            error: `Conversation too large for the model (${inputChars.toLocaleString("en-US")} of max ${MAX_MODEL_INPUT_CHARS.toLocaleString("en-US")} characters). Start a new chat to continue.`,
+          },
+          { status: 413 },
+        );
       }
 
       // Concurrency guard: a shared generation pool. The turn outlives this

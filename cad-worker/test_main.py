@@ -366,6 +366,11 @@ def test_sanitize_error_strips_absolute_paths():
     assert "<path>" in sanitize_error(msg)
 
 
+def test_sanitize_error_keeps_division_in_code():
+    msg = 'File "<string>", line 4: box(width/2, (a + b)/2, h /2)'
+    assert sanitize_error(msg) == msg
+
+
 # --- FastAPI endpoints ---
 
 def test_health_endpoint():

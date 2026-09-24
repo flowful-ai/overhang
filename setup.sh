@@ -59,10 +59,17 @@ else
   REPLY="y"
 fi
 case "${REPLY:-y}" in
-  [nN]*) echo "Skipped. Start it any time with: docker compose up --build --remove-orphans"; exit 0 ;;
+  [nN]*) echo "Skipped. Start it any time with: docker compose up -d --build --remove-orphans"; exit 0 ;;
 esac
 
 bold "Starting Overhang (first build takes a few minutes)..."
+# Detached (-d), so closing the terminal or Ctrl-C over SSH doesn't stop the
+# stack; --wait returns once the services are healthy (or fails if they aren't).
 # --remove-orphans stops containers for services no longer in docker-compose.yml
 # (the postgres service older installs ran). It never removes volumes.
-exec docker compose up --build --remove-orphans
+docker compose up -d --build --wait --remove-orphans
+
+echo
+bold "Overhang is running: http://localhost:3000"
+dim "Follow the logs with: docker compose logs -f"
+dim "Stop it with:         docker compose down"

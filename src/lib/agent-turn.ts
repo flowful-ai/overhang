@@ -2,11 +2,14 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { LanguageModelV3 } from "@ai-sdk/provider";
 import type { ProviderOptions } from "@ai-sdk/provider-utils";
 import {
+  convertToModelMessages,
   safeValidateUIMessages,
   stepCountIs,
   streamText,
   type InferUITools,
   type ModelMessage,
+  type StepResult,
+  type TextStreamPart,
   type UIDataTypes,
   type UIMessage,
 } from "ai";
@@ -15,6 +18,7 @@ import { createRunCadqueryTool, systemPromptForTurn, type RenderReport } from ".
 import { callCadWorker, pingCadWorker } from "./cad-worker";
 import type { RenderWorker } from "./cad-render";
 import { webSearchProviderOptions } from "./web-search";
+import { modelSupportsTemperature } from "./utils";
 
 // One CAD agent turn: a conversation goes in, the model runs up to
 // MAX_AGENT_STEPS steps calling runCadquery (each call renders on the CAD
@@ -57,6 +61,8 @@ export const liveCadWorker: AgentWorker = {
   ping: () => pingCadWorker(),
 };
 
+// Sent only to models that accept it (modelSupportsTemperature): OpenRouter
+// silently drops it for the others.
 const TEMPERATURE = 0.2;
 // Caps the model's reply per turn. Prevents a single verbose generation (or a
 // prompt-injection that asks for "explain every line") from burning 30k+
@@ -106,7 +112,8 @@ type AgentTools = { runCadquery: ReturnType<typeof createRunCadqueryTool> };
 /** A chat message whose tool parts are typed by the turn's tools. */
 export type AgentUIMessage = UIMessage<unknown, UIDataTypes, InferUITools<AgentTools>>;
 
-// Validation only reads the tool's schemas; this instance is never executed.
+// Validation and history conversion only read the tool's schemas and
+// toModelOutput; this instance is never executed.
 const VALIDATION_TOOLS: AgentTools = {
   runCadquery: createRunCadqueryTool({
     requestId: "validation",
@@ -117,6 +124,57 @@ const VALIDATION_TOOLS: AgentTools = {
 /** Validate inbound chat history, including runCadquery parts against the tool's input schema. */
 export function validateAgentUIMessages(messages: unknown[]) {
   return safeValidateUIMessages<AgentUIMessage>({ messages, tools: VALIDATION_TOOLS });
+}
+
+/**
+ * Convert validated chat history to model messages. Prior runCadquery results
+ * go through the tool's toModelOutput, the same projection as within a turn,
+ * so the STL never reaches the model even when the client failed to strip it.
+ * A turn stopped mid tool call leaves tool parts with no result; providers
+ * reject a tool call without its result, so those are dropped.
+ */
+export function toAgentModelMessages(messages: AgentUIMessage[]): Promise<ModelMessage[]> {
+  return convertToModelMessages(messages, { tools: VALIDATION_TOOLS, ignoreIncompleteToolCalls: true });
+}
+
+/** Shown when the turn's last step produced neither text nor a tool call. */
+export const EMPTY_REPLY_TEXT = {
+  length:
+    "The model ran out of output tokens before producing a design or a reply. Try again, ask for a simpler part, or switch models.",
+  other: "The model ended the turn without producing a design or a reply. Try again or switch models.",
+} as const;
+
+// A step that ends with neither text nor a tool call is always the last one
+// (the loop only continues after tool calls), and the user would get an empty
+// reply: e.g. finishReason "length" after the output cap went to reasoning, or
+// a malformed tool call the provider dropped. Adds a fallback text to that step
+// so the chat shows why, the model sees it as its reply next turn, and the
+// turn's own results (steps, onFinish) include it.
+function fillEmptyFinalStep(
+  chunk: TextStreamPart<AgentTools>,
+  controller: TransformStreamDefaultController<TextStreamPart<AgentTools>>,
+  state: { hasOutput: boolean },
+) {
+  if (chunk.type === "start-step") state.hasOutput = false;
+  if ((chunk.type === "text-delta" && chunk.text.trim()) || chunk.type === "tool-call") state.hasOutput = true;
+  if (chunk.type === "finish-step" && !state.hasOutput) {
+    const id = "empty-reply-fallback";
+    const text = chunk.finishReason === "length" ? EMPTY_REPLY_TEXT.length : EMPTY_REPLY_TEXT.other;
+    controller.enqueue({ type: "text-start", id });
+    controller.enqueue({ type: "text-delta", id, text });
+    controller.enqueue({ type: "text-end", id });
+  }
+  controller.enqueue(chunk);
+}
+
+/** OpenRouter's reported cost (usage.raw.cost, with includeUsage) summed over steps, or null if absent. */
+function reportedCostUsd(steps: StepResult<AgentTools>[]): number | null {
+  let total: number | null = null;
+  for (const step of steps) {
+    const cost = (step.usage as { raw?: { cost?: unknown } }).raw?.cost;
+    if (typeof cost === "number") total = (total ?? 0) + cost;
+  }
+  return total;
 }
 
 interface AgentTurnOptions {
@@ -158,7 +216,7 @@ function startStream(o: {
     model: o.model,
     system: systemPromptForTurn(webSearchOptions !== undefined),
     prompt: o.prompt,
-    temperature: TEMPERATURE,
+    temperature: modelSupportsTemperature(o.model.modelId) ? TEMPERATURE : undefined,
     providerOptions: providerOptionsForModel(o.model.modelId),
     maxRetries: 0,
     tools: o.tools,
@@ -177,10 +235,15 @@ function startStream(o: {
     // streaming and the SDK keeps running tools and steps after it, so it is
     // only logged (onError). The turn timeout remains the backstop for a
     // stream that never terminates.
+    // It also adds the fallback reply to an empty final step (fillEmptyFinalStep).
     experimental_transform: () => {
+      const state = { hasOutput: false };
       // `cancel` is part of the Streams standard and implemented by Node, but
       // TypeScript's DOM lib does not declare it on Transformer yet.
-      const transformer: Transformer & { cancel: (reason: unknown) => void } = {
+      const transformer: Transformer<TextStreamPart<AgentTools>, TextStreamPart<AgentTools>> & {
+        cancel: (reason: unknown) => void;
+      } = {
+        transform: (chunk, controller) => fillEmptyFinalStep(chunk, controller, state),
         flush: () => o.end(),
         cancel: (reason) => {
           console.error(`[${o.requestId}] agent turn stream failed:`, reason);
@@ -191,6 +254,14 @@ function startStream(o: {
     },
     onError: ({ error }) => {
       console.error(`[${o.requestId}] agent turn error:`, error);
+    },
+    onFinish: ({ steps, finishReason, totalUsage }) => {
+      const cost = reportedCostUsd(steps);
+      console.info(
+        `[${o.requestId}] agent turn finished: model=${o.model.modelId} steps=${steps.length} finish=${finishReason}` +
+          ` tokens=${totalUsage.inputTokens ?? "?"}/${totalUsage.outputTokens ?? "?"}` +
+          ` cost=${cost === null ? "?" : `$${cost.toFixed(4)}`}`,
+      );
     },
   });
 }
