@@ -19,6 +19,7 @@ import { callCadWorker, pingCadWorker } from "./cad-worker";
 import type { RenderWorker } from "./cad-render";
 import { webSearchProviderOptions } from "./web-search";
 import { modelSupportsTemperature } from "./utils";
+import { stepUsage, sumReported } from "./usage";
 
 // One CAD agent turn: a conversation goes in, the model runs up to
 // MAX_AGENT_STEPS steps calling runCadquery (each call renders on the CAD
@@ -139,42 +140,64 @@ export function toAgentModelMessages(messages: AgentUIMessage[]): Promise<ModelM
 
 /** Shown when the turn's last step produced neither text nor a tool call. */
 export const EMPTY_REPLY_TEXT = {
+  /** An earlier step of the turn rendered: the design is there, only the description is missing. */
+  rendered: "Design updated. The model ended the turn without describing the changes.",
   length:
     "The model ran out of output tokens before producing a design or a reply. Try again, ask for a simpler part, or switch models.",
+  "content-filter": "The model provider's content filter blocked the reply. Try rephrasing the request or switch models.",
   other: "The model ended the turn without producing a design or a reply. Try again or switch models.",
 } as const;
+
+const EMPTY_REPLY_TEXTS: ReadonlySet<string> = new Set(Object.values(EMPTY_REPLY_TEXT));
+
+/** Whether a turn's final text is the fallback added to an empty final step, not the model's own reply. */
+export function isEmptyReplyFallback(text: string): boolean {
+  return EMPTY_REPLY_TEXTS.has(text);
+}
+
+function emptyReplyText(finishReason: string, rendered: boolean): string {
+  if (rendered) return EMPTY_REPLY_TEXT.rendered;
+  if (finishReason === "length") return EMPTY_REPLY_TEXT.length;
+  if (finishReason === "content-filter") return EMPTY_REPLY_TEXT["content-filter"];
+  return EMPTY_REPLY_TEXT.other;
+}
 
 // A step that ends with neither text nor a tool call is always the last one
 // (the loop only continues after tool calls), and the user would get an empty
 // reply: e.g. finishReason "length" after the output cap went to reasoning, or
 // a malformed tool call the provider dropped. Adds a fallback text to that step
 // so the chat shows why, the model sees it as its reply next turn, and the
-// turn's own results (steps, onFinish) include it.
+// turn's own results (steps, onFinish) include it. The text depends on whether
+// an earlier step of the turn rendered. A step that ended in "error" gets
+// none: the error part already reaches the client.
 function fillEmptyFinalStep(
   chunk: TextStreamPart<AgentTools>,
   controller: TransformStreamDefaultController<TextStreamPart<AgentTools>>,
-  state: { hasOutput: boolean },
+  state: { hasOutput: boolean; rendered: boolean },
 ) {
   if (chunk.type === "start-step") state.hasOutput = false;
   if ((chunk.type === "text-delta" && chunk.text.trim()) || chunk.type === "tool-call") state.hasOutput = true;
-  if (chunk.type === "finish-step" && !state.hasOutput) {
+  if (chunk.type === "tool-result" && (chunk.output as { success?: unknown } | undefined)?.success === true) {
+    state.rendered = true;
+  }
+  if (chunk.type === "finish-step" && !state.hasOutput && chunk.finishReason !== "error") {
     const id = "empty-reply-fallback";
-    const text = chunk.finishReason === "length" ? EMPTY_REPLY_TEXT.length : EMPTY_REPLY_TEXT.other;
     controller.enqueue({ type: "text-start", id });
-    controller.enqueue({ type: "text-delta", id, text });
+    controller.enqueue({ type: "text-delta", id, text: emptyReplyText(chunk.finishReason, state.rendered) });
     controller.enqueue({ type: "text-end", id });
   }
   controller.enqueue(chunk);
 }
 
-/** OpenRouter's reported cost (usage.raw.cost, with includeUsage) summed over steps, or null if absent. */
-function reportedCostUsd(steps: StepResult<AgentTools>[]): number | null {
-  let total: number | null = null;
-  for (const step of steps) {
-    const cost = (step.usage as { raw?: { cost?: unknown } }).raw?.cost;
-    if (typeof cost === "number") total = (total ?? 0) + cost;
-  }
-  return total;
+/** Logs a turn's token usage and OpenRouter's reported cost, summed over its completed steps. */
+function logTurnUsage(requestId: string, modelId: string, outcome: string, steps: StepResult<AgentTools>[]) {
+  const usages = steps.map((step) => stepUsage(step.usage));
+  const cost = sumReported(usages, "costUsd");
+  console.info(
+    `[${requestId}] agent turn ${outcome}: model=${modelId} steps=${steps.length}` +
+      ` tokens=${sumReported(usages, "inputTokens") ?? "?"}/${sumReported(usages, "outputTokens") ?? "?"}` +
+      ` cost=${cost === null ? "?" : `$${cost.toFixed(4)}`}`,
+  );
 }
 
 interface AgentTurnOptions {
@@ -237,7 +260,7 @@ function startStream(o: {
     // stream that never terminates.
     // It also adds the fallback reply to an empty final step (fillEmptyFinalStep).
     experimental_transform: () => {
-      const state = { hasOutput: false };
+      const state = { hasOutput: false, rendered: false };
       // `cancel` is part of the Streams standard and implemented by Node, but
       // TypeScript's DOM lib does not declare it on Transformer yet.
       const transformer: Transformer<TextStreamPart<AgentTools>, TextStreamPart<AgentTools>> & {
@@ -255,13 +278,13 @@ function startStream(o: {
     onError: ({ error }) => {
       console.error(`[${o.requestId}] agent turn error:`, error);
     },
-    onFinish: ({ steps, finishReason, totalUsage }) => {
-      const cost = reportedCostUsd(steps);
-      console.info(
-        `[${o.requestId}] agent turn finished: model=${o.model.modelId} steps=${steps.length} finish=${finishReason}` +
-          ` tokens=${totalUsage.inputTokens ?? "?"}/${totalUsage.outputTokens ?? "?"}` +
-          ` cost=${cost === null ? "?" : `$${cost.toFixed(4)}`}`,
-      );
+    // Usage is logged however the turn ends with completed steps: finished, or
+    // aborted (caller or turn timeout), which a timed-out turn still paid for.
+    onFinish: ({ steps, finishReason }) => {
+      logTurnUsage(o.requestId, o.model.modelId, `finished (${finishReason})`, steps);
+    },
+    onAbort: ({ steps }) => {
+      logTurnUsage(o.requestId, o.model.modelId, "aborted", steps);
     },
   });
 }

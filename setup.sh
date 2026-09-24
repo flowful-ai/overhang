@@ -62,12 +62,24 @@ case "${REPLY:-y}" in
   [nN]*) echo "Skipped. Start it any time with: docker compose up -d --build --remove-orphans"; exit 0 ;;
 esac
 
+# --wait needs Docker Compose v2.1.1 or later. Checked up front, because an
+# older Compose fails on the unknown flag with no hint.
+if ! docker compose up --help 2>/dev/null | grep -- '--wait' >/dev/null; then
+  echo "Docker Compose v2.1.1 or later is required (found: $(docker compose version 2>/dev/null || echo none))."
+  echo "Update Docker (https://docs.docker.com/compose/install/), then re-run ./setup.sh."
+  exit 1
+fi
+
 bold "Starting Overhang (first build takes a few minutes)..."
 # Detached (-d), so closing the terminal or Ctrl-C over SSH doesn't stop the
 # stack; --wait returns once the services are healthy (or fails if they aren't).
 # --remove-orphans stops containers for services no longer in docker-compose.yml
 # (the postgres service older installs ran). It never removes volumes.
-docker compose up -d --build --wait --remove-orphans
+docker compose up -d --build --wait --remove-orphans || {
+  echo
+  echo "Startup failed. See what went wrong with: docker compose logs"
+  exit 1
+}
 
 echo
 bold "Overhang is running: http://localhost:3000"

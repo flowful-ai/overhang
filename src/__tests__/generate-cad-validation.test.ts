@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import type { LanguageModelV3CallOptions, LanguageModelV3StreamPart } from "@ai-sdk/provider";
 import type { UIMessage } from "ai";
-import { createGenerateCadPost, MAX_MODEL_INPUT_CHARS } from "@/app/api/generate-cad/handler";
+import { createGenerateCadPost, MAX_MODEL_INPUT_CHARS, OMITTED_ATTEMPT_TEXT } from "@/app/api/generate-cad/handler";
 import { forNextTurn } from "@/components/chat/next-turn";
 import { MAX_AGENT_STEPS } from "@/components/chat/constants";
 import { GENERATION_POOL, acquirePoolSlot, releasePoolSlot } from "@/lib/in-flight";
@@ -336,6 +336,46 @@ describe("generate-cad request validation", () => {
     expect(res.status).toBe(413);
     expect((await res.json()).error).toMatch(/too large for the model/);
     expect(doStream).not.toHaveBeenCalled();
+  });
+
+  it("trims the oldest render attempts to fit the model-input cap, keeping the basis and the latest turns", async () => {
+    const doStream = textOnly();
+    mockModel = new MockLanguageModelV3({ doStream });
+    const BASIS_TURN = 3;
+    const attempt = (i: number) => `# attempt ${i}\n${"x".repeat(40_000)}`;
+    const messages = Array.from({ length: 10 }, (_, i) => [
+      user(`turn ${i}`),
+      {
+        id: `a${i}`,
+        role: "assistant",
+        parts: [
+          { type: "step-start" },
+          {
+            type: "tool-runCadquery",
+            toolCallId: `c${i}`,
+            state: "output-available",
+            input: { code: attempt(i) },
+            output:
+              i === BASIS_TURN
+                ? { success: true, code: attempt(i), warnings: [], summary: "Render OK." }
+                : { success: false, code: attempt(i), error: `NameError ${i}` },
+          },
+          { type: "text", text: `reply ${i}`, state: "done" },
+        ],
+      },
+    ]).flat();
+    const res = await post({ messages: [...messages, user("go on")] });
+    expect(res.status).toBe(200);
+    await drain(res);
+
+    const prompt = JSON.stringify(doStream.mock.calls[0][0].prompt);
+    expect(prompt.length).toBeLessThan(MAX_MODEL_INPUT_CHARS + 20_000); // + system prompt and tool definitions
+    expect(prompt).toContain(OMITTED_ATTEMPT_TEXT);
+    expect(prompt).not.toContain("# attempt 0");
+    expect(prompt).toContain(`# attempt ${BASIS_TURN}`); // the basis survives
+    expect(prompt).toContain("# attempt 9"); // the latest turns are untouched
+    expect(prompt).toContain("NameError 9");
+    for (let i = 0; i < 10; i++) expect(prompt).toContain(`reply ${i}`); // text is never trimmed
   });
 
   it("does not count the omitted-snapshot placeholder toward the prompt length limit", async () => {

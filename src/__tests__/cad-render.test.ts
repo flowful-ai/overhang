@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { renderCad, WORKER_BUSY_ERROR } from "@/lib/cad-render";
+import { renderCad } from "@/lib/cad-render";
+import { createRunCadqueryTool, WORKER_BUSY_ERROR } from "@/lib/cad-agent";
 import type { WorkerRenderResult } from "@/lib/cad-worker-protocol";
 
 const okWorker = (over: Partial<WorkerRenderResult> = {}): WorkerRenderResult => ({
@@ -64,7 +65,7 @@ describe("renderCad", () => {
       expect(callWorker).toHaveBeenCalledTimes(3);
     });
 
-    it("gives up after the retries with an error marked transient, not a code failure", async () => {
+    it("gives up after the retries with the worker's own message and status (what /api/render-cad shows)", async () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       const callWorker = vi.fn(async (): Promise<WorkerRenderResult> => {
         throw busy();
@@ -72,8 +73,31 @@ describe("renderCad", () => {
       const r = await renderCad("code", "req-6", { callWorker, busyRetryDelaysMs: NO_WAIT });
       warn.mockRestore();
       expect(callWorker).toHaveBeenCalledTimes(3);
-      expect(r).toEqual({ success: false, code: "code", error: WORKER_BUSY_ERROR, workerStatus: 503 });
-      expect(WORKER_BUSY_ERROR).toMatch(/Resend the same code unchanged/);
+      expect(r).toEqual({
+        success: false,
+        code: "code",
+        error: "CAD Rendering Failed: Worker is busy",
+        workerStatus: 503,
+      });
+    });
+
+    it("tells the model (runCadquery tool) the failure is transient, not a code problem", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const worker = vi.fn(async (): Promise<WorkerRenderResult> => {
+          throw busy();
+        });
+        const runCadquery = createRunCadqueryTool({ requestId: "req-9", worker });
+        const pending = runCadquery.execute!({ code: "code" }, { toolCallId: "c1", messages: [] });
+        await vi.runAllTimersAsync();
+        expect(await pending).toEqual({ success: false, code: "code", error: WORKER_BUSY_ERROR });
+        expect(worker).toHaveBeenCalledTimes(3);
+        expect(WORKER_BUSY_ERROR).toMatch(/Resend the same code unchanged/);
+      } finally {
+        warn.mockRestore();
+        vi.useRealTimers();
+      }
     });
 
     it("stops retrying once the caller aborts", async () => {

@@ -1,7 +1,14 @@
 import "./load-env"; // must be first: cad-worker.ts snapshots env at import time
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { liveCadWorker, openRouterModel, runAgentTurn, type AgentWorker } from "../src/lib/agent-turn";
+import {
+  isEmptyReplyFallback,
+  liveCadWorker,
+  openRouterModel,
+  runAgentTurn,
+  type AgentWorker,
+} from "../src/lib/agent-turn";
+import { sumReported } from "../src/lib/usage";
 import { webSearchProviderOptions } from "../src/lib/web-search";
 import { caseCostDecision, stepUsage, type CostDecision, type StepUsage } from "./cost";
 import { callCadWorker, pingCadWorker } from "../src/lib/cad-worker";
@@ -50,6 +57,8 @@ interface CaseRunResult {
   /** Model's final visible reply (truncated). The main clue when a case fails. */
   finalText?: string;
   finishReason?: string;
+  /** The model's final step was empty: finalText is the turn's fallback text, not the model's. */
+  emptyReply?: boolean;
   /** The turn did not complete (no output, timeout, worker down). */
   error?: string;
   /** Error parts the turn streamed but recovered from; the case is still scored on its outcome. */
@@ -89,10 +98,6 @@ function parseArgs(argv: string[]) {
 }
 
 /** Sum a field over completed steps; null when no step reported it. */
-function sumReported(steps: readonly StepUsage[], key: keyof StepUsage): number | null {
-  return steps.reduce<number | null>((sum, s) => (s[key] === null ? sum : (sum ?? 0) + (s[key] as number)), null);
-}
-
 async function runCase(
   evalCase: EvalCase,
   model: string,
@@ -212,6 +217,7 @@ async function runCase(
     metrics,
     finalText: finalText.slice(0, 500),
     finishReason,
+    ...(isEmptyReplyFallback(finalText) ? { emptyReply: true } : {}),
     error,
     ...(streamErrors.length ? { streamErrors } : {}),
   };
@@ -234,6 +240,7 @@ function printReport(model: string, results: CaseRunResult[]) {
     );
     for (const e of r.streamErrors ?? []) console.log(`  stream error (turn continued): ${e.slice(0, 200)}`);
     if (r.error) console.log(`  error: ${r.error.slice(0, 200)}`);
+    else if (r.emptyReply) console.log(`  empty reply (finish: ${r.finishReason || "?"}): the model produced no final text`);
     else if (!r.score.pass) {
       console.log(`  finish: ${r.finishReason || "?"} · text: ${(r.finalText || "<empty>").slice(0, 200).replace(/\n/g, " ")}`);
     }

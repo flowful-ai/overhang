@@ -357,6 +357,10 @@ result = (
 # Bolt holes from the NON-inverted bottom workplane (pitfall 8).
 `;
 
+/** What the model sees when the worker stayed busy through renderCad's retries. */
+export const WORKER_BUSY_ERROR =
+  "CAD worker is busy (transient infrastructure condition, not a problem with the code). Resend the same code unchanged.";
+
 export interface RenderReport {
   code: string;
   bbox: BoundingBox;
@@ -390,7 +394,13 @@ export function createRunCadqueryTool({ requestId, worker, onRender }: RunCadque
     }),
     execute: async ({ code }, { abortSignal }): Promise<CadqueryToolResult> => {
       const r = await renderCad(code, requestId, { callWorker: worker, signal: abortSignal });
-      if (!r.success) return { success: false, code: r.code, error: r.error };
+      if (!r.success) {
+        // A 503 that outlasted renderCad's retries is load, not the code.
+        // Returned as a plain failure, the model "fixes" working code and burns
+        // steps.
+        const error = r.workerStatus === 503 ? WORKER_BUSY_ERROR : r.error;
+        return { success: false, code: r.code, error };
+      }
       const { x, y, z } = r.metrics.bbox;
       onRender?.({ code: r.code, bbox: { x, y, z }, warnings: r.warnings });
       const head = `Render OK. Bounding box: ${x.toFixed(1)}x${y.toFixed(1)}x${z.toFixed(1)}mm.`;

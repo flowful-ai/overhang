@@ -5,6 +5,7 @@ import { MAX_AGENT_STEPS } from "@/components/chat/constants";
 import {
   AGENT_TURN_TIMEOUT_MS,
   EMPTY_REPLY_TEXT,
+  isEmptyReplyFallback,
   openRouterModel,
   runAgentTurn,
   type AgentWorker,
@@ -31,6 +32,17 @@ function toolStep(id: string): LanguageModelV3StreamPart[] {
     { type: "stream-start", warnings: [] },
     { type: "tool-call", toolCallId: id, toolName: "runCadquery", input: JSON.stringify({ code: CUBE }) },
     { type: "finish", finishReason: { unified: "tool-calls", raw: undefined }, usage: USAGE },
+  ];
+}
+
+/** A step that reasons and then ends with neither text nor a tool call. */
+function emptyStep(reason: "length" | "other" | "content-filter" | "error"): LanguageModelV3StreamPart[] {
+  return [
+    { type: "stream-start", warnings: [] },
+    { type: "reasoning-start", id: "r" },
+    { type: "reasoning-delta", id: "r", delta: "Thinking at length..." },
+    { type: "reasoning-end", id: "r" },
+    { type: "finish", finishReason: { unified: reason, raw: undefined }, usage: USAGE },
   ];
 }
 
@@ -137,17 +149,11 @@ describe("runAgentTurn", () => {
 
   it.each([
     ["length", EMPTY_REPLY_TEXT.length],
+    ["content-filter", EMPTY_REPLY_TEXT["content-filter"]],
     ["other", EMPTY_REPLY_TEXT.other],
   ] as const)("replies with a fallback when the turn ends with finishReason %s and no output", async (reason, text) => {
-    const emptyStep: LanguageModelV3StreamPart[] = [
-      { type: "stream-start", warnings: [] },
-      { type: "reasoning-start", id: "r" },
-      { type: "reasoning-delta", id: "r", delta: "Thinking at length..." },
-      { type: "reasoning-end", id: "r" },
-      { type: "finish", finishReason: { unified: reason, raw: undefined }, usage: USAGE },
-    ];
     const stream = await startedTurn({
-      model: new MockLanguageModelV3({ doStream: scripted([emptyStep]) }),
+      model: new MockLanguageModelV3({ doStream: scripted([emptyStep(reason)]) }),
       prompt: "make a cube",
       worker: fakeWorker(),
       requestId: "empty",
@@ -158,6 +164,41 @@ describe("runAgentTurn", () => {
     expect(await stream.text).toBe(text);
     expect((await stream.steps)[0].finishReason).toBe(reason);
     expect(uiChunks).toContainEqual(expect.objectContaining({ type: "text-delta", delta: text }));
+    expect(isEmptyReplyFallback(await stream.text)).toBe(true);
+  });
+
+  it("says the design was updated when an earlier step rendered", async () => {
+    const stream = await startedTurn({
+      model: new MockLanguageModelV3({ doStream: scripted([toolStep("c1"), emptyStep("length")]) }),
+      prompt: "make a cube",
+      worker: fakeWorker(),
+      requestId: "empty-after-render",
+    });
+    expect(await stream.text).toBe(EMPTY_REPLY_TEXT.rendered);
+  });
+
+  it("keeps the no-design text when the earlier render failed", async () => {
+    const render = vi.fn<AgentWorker["render"]>(async () => {
+      throw Object.assign(new Error("CAD Rendering Failed: NameError"), { workerStatus: 400 });
+    });
+    const stream = await startedTurn({
+      model: new MockLanguageModelV3({ doStream: scripted([toolStep("c1"), emptyStep("other")]) }),
+      prompt: "make a cube",
+      worker: fakeWorker({ render }),
+      requestId: "empty-after-failure",
+    });
+    expect(await stream.text).toBe(EMPTY_REPLY_TEXT.other);
+  });
+
+  it("adds no fallback to a step that ended in error", async () => {
+    const stream = await startedTurn({
+      model: new MockLanguageModelV3({ doStream: scripted([emptyStep("error")]) }),
+      prompt: "make a cube",
+      worker: fakeWorker(),
+      requestId: "empty-error",
+    });
+    expect(await stream.text).toBe("");
+    expect(isEmptyReplyFallback("Done.")).toBe(false);
   });
 
   it("adds no fallback when the final step has text", async () => {
@@ -188,6 +229,31 @@ describe("runAgentTurn", () => {
       expect(line).toContain("steps=2");
       expect(line).toContain("tokens=2/2");
       expect(line).toContain("cost=$0.0030");
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it("logs the usage of an aborted turn's completed steps", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const { render, started } = hangingRender();
+      const controller = new AbortController();
+      const stream = await startedTurn({
+        model: new MockLanguageModelV3({ doStream: scripted([toolStep("c1")]) }),
+        prompt: "make a cube",
+        worker: fakeWorker({ render }),
+        requestId: "usage-abort",
+        abortSignal: controller.signal,
+      });
+      const consumed = stream.consumeStream();
+      await started;
+      controller.abort();
+      await consumed;
+      await vi.waitFor(() => expect(info).toHaveBeenCalled());
+      const line = String(info.mock.calls[0][0]);
+      expect(line).toContain("[usage-abort] agent turn aborted");
+      expect(line).toContain("tokens=");
     } finally {
       info.mockRestore();
     }
