@@ -1,10 +1,14 @@
 from fastapi import FastAPI, HTTPException, Request, Header
 from pydantic import BaseModel, field_validator
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from typing import Optional
 import ast
 import builtins
 import cadquery as cq
+from OCP.BRep import BRep_Tool
+from OCP.BRepMesh import BRepMesh_IncrementalMesh
+from OCP.TopLoc import TopLoc_Location
 import trimesh
 import numpy as np
 import math
@@ -12,6 +16,7 @@ import tempfile
 import os
 import base64
 import secrets
+import signal
 import io
 import logging
 import re
@@ -19,9 +24,14 @@ import hashlib
 import traceback
 import asyncio
 import ctypes
+import multiprocessing
+import multiprocessing.forkserver
+import resource
 import threading
+import time
 from collections import OrderedDict
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 
 # Ensure module-level logger output is visible (uvicorn's default config does
 # not propagate application loggers by default).
@@ -31,7 +41,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+
+@asynccontextmanager
+async def _lifespan(_app):
+    # Start the render forkserver (~1.3 s: it imports cadquery) at boot instead
+    # of inside the first /health probe or render, which would otherwise pay
+    # it against its deadline (the frontend's /health ping gives up after 2 s).
+    # Runs in the API process only: the forkserver imports this module too,
+    # but never runs the app's lifespan.
+    try:
+        await asyncio.to_thread(multiprocessing.forkserver.ensure_running)
+    except Exception:
+        logger.exception("render forkserver failed to start; /health will report it")
+    yield
+
+
+app = FastAPI(lifespan=_lifespan)
 
 # CORS configuration - restrict in production by setting ALLOWED_ORIGINS env var
 # Example: ALLOWED_ORIGINS=https://myapp.com,https://www.myapp.com
@@ -49,14 +74,25 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
-# Execution timeout (in seconds)
+# Wall-clock limit (in seconds) for one render or export, exec + export
+# included. Enforced by SIGKILLing the render's child process.
 EXEC_TIMEOUT = int(os.environ.get("EXEC_TIMEOUT", "30"))
 
 # Shared secret with the Next.js frontend. Required on every /render and
 # /export-3mf request so that nothing else on the docker network (including a
 # sandbox-escaped Python process) can drive arbitrary CadQuery execution.
 # CORS is browser-only and doesn't help against curl-from-inside-the-network.
-WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
+# Popped, not read: the render forkserver is exec'd with the environment left
+# after this, so user code can't read the secret from /proc/self/environ.
+WORKER_SECRET = os.environ.pop("WORKER_SECRET", "")
+
+# Non-dumpable: /proc/<pid>/{environ,mem} of this process become root-owned,
+# so a render child (same uid) can't read the secret from the parent either.
+# Linux only; a no-op elsewhere.
+try:
+    ctypes.CDLL(None, use_errno=True).prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE
+except (OSError, AttributeError):
+    pass
 
 
 def require_worker_secret(provided: Optional[str]) -> None:
@@ -140,9 +176,10 @@ SAFE_BUILTINS = {
     "__name__": "__main__",
 }
 
-# Non-builtins globals shared with every exec. `__builtins__` is added per
-# call from a fresh copy of SAFE_BUILTINS so user code that mutates it (e.g.
-# `__builtins__.clear()`) can only poison its own request, not later ones.
+# Non-builtins globals for every exec. `__builtins__` is added per call from a
+# fresh copy of SAFE_BUILTINS. The module objects themselves are shared, so
+# tampering (`math.pi = 3`) lasts for the rest of the process; that is safe
+# only because every render runs in a fresh child process (see _run_in_child).
 EXEC_BASE_GLOBALS = {
     "cq": cq,
     "cadquery": cq,
@@ -155,58 +192,6 @@ EXEC_BASE_GLOBALS = {
 def make_exec_globals() -> dict:
     return {"__builtins__": dict(SAFE_BUILTINS), **EXEC_BASE_GLOBALS}
 
-
-class ExecTimeoutError(Exception):
-    pass
-
-
-def _async_raise(thread_id: int, exc_type: Optional[type]) -> None:
-    """Asynchronously raise `exc_type` in the thread with the given id (or, if
-    None, clear any pending async exception on it). Uses CPython's
-    PyThreadState_SetAsyncExc; the exception is delivered at the next bytecode
-    boundary in that thread, so it interrupts pure-Python loops but not a
-    blocking C call already in progress (the previous SIGALRM timeout had the
-    same limitation)."""
-    arg = ctypes.py_object(exc_type) if exc_type is not None else None
-    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(thread_id), arg)
-    if res > 1:
-        # Affected more than one thread state — undo to avoid corrupting others.
-        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(thread_id), None)
-
-
-@contextmanager
-def timeout(seconds: int):
-    """Interrupt the calling thread if the wrapped block runs longer than
-    `seconds`. Unlike the previous SIGALRM implementation this works on any
-    thread, so the request handlers can offload exec() onto a worker thread
-    (via asyncio.to_thread) and keep the event loop responsive.
-    """
-    target_tid = threading.get_ident()
-    lock = threading.Lock()
-    finished = False
-
-    def fire():
-        with lock:
-            if not finished:
-                _async_raise(target_tid, ExecTimeoutError)
-
-    timer = threading.Timer(seconds, fire)
-    timer.start()
-    try:
-        yield
-    except ExecTimeoutError:
-        raise ExecTimeoutError(f"Code execution timed out after {seconds} seconds")
-    finally:
-        # Take the lock FIRST and clear before anything else: if fire() already
-        # scheduled an async exception (under the lock) but it hasn't landed, the
-        # lock.acquire() here blocks in C (not interruptible by the async exc),
-        # and clearing as the first statement minimizes the window in which a
-        # stray ExecTimeoutError could surface in unrelated later code on this
-        # (pooled) worker thread.
-        with lock:
-            finished = True
-            _async_raise(target_tid, None)
-        timer.cancel()
 
 MAX_CODE_LENGTH = 50_000
 
@@ -248,33 +233,84 @@ class ThreeMFResponse(BaseModel):
     threemf_base64: str
     console_output: Optional[str] = None
 
-def _solids_of(result) -> Optional[list]:
-    """All solids in a result, or None when the type isn't measurable.
-    Assembly solids are measured as placed (toCompound applies Locations)."""
-    if isinstance(result, cq.Workplane):
-        return result.solids().vals()
+_RESULT_TYPES_HINT = "Assign `result` a cq.Workplane, a cq.Shape (e.g. from .val()) or a cq.Assembly."
+
+
+def _leaf_shapes(shapes) -> list:
+    """Expand (nested) Compounds into their non-compound members, so every
+    body becomes its own member of the export compound. The 3MF writer emits
+    one object per direct child of the compound; a nested Compound (e.g. the
+    val of a union of two disjoint boxes) would merge those bodies into one
+    object."""
+    out = []
+    for s in shapes:
+        if isinstance(s, cq.Compound):
+            out.extend(_leaf_shapes(list(s)))
+        else:
+            out.append(s)
+    return out
+
+
+def _compound_of(shapes) -> "cq.Shape":
+    return cq.Compound.makeCompound(_leaf_shapes(shapes))
+
+
+def as_export_shape(result) -> "cq.Shape":
+    """Normalize a user `result` to the single cq.Shape that gets measured and
+    exported, or raise a ValueError that tells the LLM how to fix it.
+
+    Anything that isn't a Workplane, Shape, Assembly or list of Shapes is a
+    hard error. Previously a cq.Sketch slipped through: it is iterable (its
+    faces), so the exporter happily meshed it while the volume check could not
+    measure it, and a flat 2D sketch "rendered OK" with volume 0.
+    NB: no "/" in these messages; sanitize_error strips path-like substrings.
+    """
+    if isinstance(result, cq.Compound):
+        return _compound_of([result])
+    if isinstance(result, cq.Shape):
+        return result
     if isinstance(result, cq.Assembly):
-        return result.toCompound().Solids()
-    if hasattr(result, "Solids"):
-        # cq.Solid / cq.Compound / cq.Shape (e.g. from a .val() call).
-        return result.Solids()
-    return None
+        # Solids measured and exported as placed (toCompound applies Locations).
+        return _compound_of([result.toCompound()])
+    if isinstance(result, cq.Workplane):
+        return _compound_of([v for v in result.vals() if isinstance(v, cq.Shape)])
+    if result is None:
+        raise ValueError(
+            "`result` is None. Check that the variable holds the final model (a "
+            "function that forgets to `return` its Workplane yields None). " + _RESULT_TYPES_HINT
+        )
+    if isinstance(result, cq.Sketch):
+        raise ValueError(
+            "`result` is a cq.Sketch, which is 2D and has no volume. Extrude it "
+            "(e.g. cq.Workplane('XY').placeSketch(s).extrude(h)) or assign a "
+            "cq.Workplane, cq.Shape or cq.Assembly."
+        )
+    if isinstance(result, (list, tuple)):
+        if result and all(isinstance(v, cq.Shape) for v in result):
+            return _compound_of(result)
+        raise ValueError(
+            f"`result` is a {type(result).__name__} of "
+            f"{', '.join(sorted({type(v).__name__ for v in result})) or 'nothing'}. "
+            "Combine parts into one object: a.union(b) for a single body, or a "
+            "cq.Assembly for separate parts."
+        )
+    raise ValueError(
+        f"`result` is of type {type(result).__name__}, which can't be exported. " + _RESULT_TYPES_HINT
+    )
 
 
-def compute_metrics(result) -> tuple[dict, Optional[float]]:
-    """Bounding box and total solid volume (mm3, unrounded) of a result.
+def compute_metrics(shape: "cq.Shape") -> tuple[dict, Optional[float]]:
+    """Bounding box and total solid volume (mm3, unrounded) of an export shape
+    (the output of as_export_shape).
 
-    Volume is None when it couldn't be measured confidently: an unknown result
-    type, or a geometry call that raised. That is deliberate — the degenerate
-    check in _render_pipeline must only ADD a rejection for a provably-empty
-    body, never reject a result that would otherwise export fine, so it needs
-    to distinguish "measured 0.0" from "couldn't measure".
+    Volume is None when a geometry call raised. That is deliberate — the
+    degenerate check in _render_pipeline must only ADD a rejection for a
+    provably-empty body, never reject a result that would otherwise export
+    fine, so it needs to distinguish "measured 0.0" from "couldn't measure".
     """
     bbox = {"x": 0, "y": 0, "z": 0}
     try:
-        solids = _solids_of(result)
-        if solids is None:
-            return bbox, None
+        solids = shape.Solids()
         volume = sum(s.Volume() for s in solids)
         if solids:
             boxes = [s.BoundingBox() for s in solids]
@@ -398,6 +434,18 @@ def validate_mesh(stl_bytes: bytes) -> list[str]:
         if not np.isfinite(tm.vertices).all():
             warnings.append("Invalid geometry: mesh contains NaN or infinite coordinates")
             return warnings
+
+        # OCC emits a few zero-area triangles where a face collapses to a point
+        # (sphere poles, fillet corners, revolves touching the axis). Their
+        # collapsed edges break trimesh's edge-pairing, so perfectly closed
+        # solids read as non-watertight. trimesh.load(process=True) has already
+        # welded coincident vertices, so a collapsed triangle repeats a vertex
+        # index; drop exactly those. Collinear slivers with three distinct
+        # vertices are kept: they still pair edges with their neighbours, and
+        # dropping them could open a false hole. Genuine holes still leave
+        # unpaired edges.
+        f = tm.faces
+        tm.update_faces((f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2]))
 
         if not tm.is_watertight:
             warnings.append("Non-watertight mesh: may cause slicing issues. Check for unclosed shells or boolean artifacts.")
@@ -541,12 +589,11 @@ def exec_user_code(code: str) -> tuple[object, str]:
     Raises on failure. Used by both /render and /export-3mf.
 
     User print() output is captured by injecting a buffer-bound `print` into
-    this call's sandbox builtins, NOT via contextlib.redirect_stdout. Redirect
-    swaps the *process-global* sys.stdout, which is unsafe now that execs run
-    concurrently on worker threads (asyncio.to_thread): two requests would
-    cross-contaminate each other's console output and race the restore. A
-    per-call print keeps each request's output isolated. Sandboxed code has no
-    access to `sys`, so replacing `print` captures everything it can emit.
+    this call's sandbox builtins, NOT via contextlib.redirect_stdout, which
+    swaps the process-global sys.stdout. A per-call print scopes the output to
+    this exec without touching global state, wherever it runs (a render child,
+    or in-process in the tests). Sandboxed code has no access to `sys`, so
+    replacing `print` captures everything it can emit.
     """
     console_buf = io.StringIO()
 
@@ -566,9 +613,9 @@ def exec_user_code(code: str) -> tuple[object, str]:
     # comprehension bodies and function bodies compile their reads as GLOBAL
     # lookups, so `[w * i for i in range(n)]` or a helper function reading a
     # top-level parameter dies with NameError. The dict is per-call, so user
-    # code still can't poison later requests.
-    with timeout(EXEC_TIMEOUT):
-        exec(code, exec_globals)
+    # code still can't poison later requests. No timeout here: the parent
+    # SIGKILLs the whole child process at the deadline.
+    exec(code, exec_globals)
 
     if "result" not in exec_globals:
         raise ValueError("The code must define a 'result' variable containing the CadQuery object.")
@@ -576,54 +623,149 @@ def exec_user_code(code: str) -> tuple[object, str]:
     return exec_globals["result"], console_buf.getvalue()
 
 
-# Max chordal deviation of the export tessellation (mm), for both the preview
-# STL and the printable STL/3MF (they are the same bytes: the STL download
-# ships the render result). CadQuery's default of 0.1 leaves visible facets on
-# curved features and prints holes undersized beyond their intended clearance;
-# 0.02 is in the conventional range for slicer-bound meshes. Measured cost is
-# small — the 0.1 rad angular tolerance bounds curved-surface refinement
-# (vase STL 214 -> 295 KiB, export 24 -> 27 ms).
+# Max chordal deviation of the export tessellation, in absolute mm, for both
+# the preview STL and the printable STL/3MF (they are the same bytes: the STL
+# download ships the render result). CadQuery's default of 0.1 leaves visible
+# facets on curved features and prints holes undersized beyond their intended
+# clearance; 0.02 is in the conventional range for slicer-bound meshes.
+#
+# It must be applied as an ABSOLUTE deflection: cq.exporters.export() meshes
+# with relative=True, where the value is a fraction of each edge's length, so
+# with the angular limit dominating, 0.1, 0.02 and 0.005 produced
+# byte-identical STLs. export_to_bytes therefore meshes the shape itself.
+#
+# This is the floor for small parts. A fixed 0.02 on a large curved part
+# has no triangle budget (triangle count grows ~ size / deflection): a
+# sphere(120) went to 60k triangles (2.9 MB, ~0.9 s) on every /render. So
+# above a bounding-box diagonal of EXPORT_TOLERANCE_REF_DIAG_MM the deflection
+# grows as (diag / ref) ** EXPORT_TOLERANCE_SIZE_EXPONENT (export_tolerance_mm).
+# An exponent of 1 would hold the triangle count of a given shape constant as
+# it scales up; 1.25 lets it fall slowly, so large parts stay at or below the
+# old relative-meshing sizes (sphere(120): 391 KiB before this PR, 317 KiB
+# now, deflection ~0.19 mm) while parts up to a 70 mm diagonal (sphere(20):
+# 69 mm) keep the full 0.02 mm and the polar-flange eval fixture (85 mm)
+# gets 0.026 mm.
 EXPORT_TOLERANCE_MM = 0.02
+EXPORT_TOLERANCE_REF_DIAG_MM = 70.0
+EXPORT_TOLERANCE_SIZE_EXPONENT = 1.25
+
+# Max angle (radians) between adjacent facets on curved surfaces. 0.2 rad
+# (~11.5 deg, >= ~31 segments per full circle) keeps small holes and fillets
+# round, while the chordal limit governs larger radii. The old 0.1 rad
+# doubled the facets on every small curved feature below the chordal limit
+# anyway. Binary STL sizes vs the old relative meshing: see the PR (#3).
+EXPORT_ANGULAR_TOLERANCE_RAD = 0.2
 
 
-def export_to_bytes(result: object, export_type: str, suffix: str) -> bytes:
-    """Export a CadQuery result to bytes in the given format."""
-    # cq.exporters.export() does not accept cq.Assembly, but the system prompt
-    # tells the model to use Assembly for multi-part models. Flatten to a
-    # compound so multi-part results export as one mesh with parts positioned
-    # as placed.
-    if isinstance(result, cq.Assembly):
-        result = cq.Workplane(obj=result.toCompound())
+def export_tolerance_mm(shape: "cq.Shape") -> float:
+    """Absolute linear deflection for meshing `shape`: EXPORT_TOLERANCE_MM for
+    small parts, growing with the bounding-box diagonal for large ones."""
+    scale = max(1.0, shape.BoundingBox().DiagonalLength / EXPORT_TOLERANCE_REF_DIAG_MM)
+    return EXPORT_TOLERANCE_MM * scale ** EXPORT_TOLERANCE_SIZE_EXPONENT
+
+
+def _tessellate_absolute(shape: "cq.Shape", tolerance: float) -> None:
+    """Mesh `shape` in place with an absolute `tolerance` deflection, and
+    check that every face got a triangulation.
+
+    Both the STL and the 3MF writer then serialize this triangulation as-is
+    (see export_to_bytes for how the 3MF path is kept from re-meshing). A face
+    left untriangulated would be silently dropped by the STL writer, and
+    re-meshed with infinite deflection by the 3MF writer, so it is an error.
+    """
+    BRepMesh_IncrementalMesh(shape.wrapped, tolerance, False, EXPORT_ANGULAR_TOLERANCE_RAD, True)
+    faces = shape.Faces()
+    missing = sum(1 for f in faces if BRep_Tool.Triangulation_s(f.wrapped, TopLoc_Location()) is None)
+    if missing:
+        raise ValueError(
+            f"Export failed: {missing} of {len(faces)} faces could not be meshed. "
+            "The geometry is likely invalid (self-intersecting or degenerate faces); "
+            "simplify the failing feature or check result.val().isValid()."
+        )
+
+
+def export_to_bytes(shape: "cq.Shape", export_type: str, suffix: str) -> bytes:
+    """Export a normalized shape (from as_export_shape) to bytes in the given
+    format ("STL" or "3MF")."""
+    tolerance = export_tolerance_mm(shape)
+    _tessellate_absolute(shape, tolerance)
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp_path = tmp.name
     try:
-        cq.exporters.export(result, tmp_path, exportType=export_type, tolerance=EXPORT_TOLERANCE_MM)
+        if export_type == "STL":
+            # Same parameters as _tessellate_absolute, so exportStl's own
+            # BRepMesh pass finds the mesh already done and just writes it.
+            if not shape.exportStl(
+                tmp_path, tolerance, EXPORT_ANGULAR_TOLERANCE_RAD, ascii=False, relative=False
+            ):
+                raise ValueError("STL export failed: the shape has no tessellated faces.")
+        else:
+            # The 3MF writer tessellates via Shape.mesh(), which re-meshes
+            # (relative, i.e. the bug above) unless every face already has a
+            # triangulation whose recorded deflection is <= `tolerance`. OCC
+            # records its surface-deflection estimate there, which can exceed
+            # what was requested (0.041 for a 0.02 sphere mesh), so passing our
+            # tolerance would silently discard our mesh. An infinite tolerance
+            # means "reuse the existing triangulation", which is safe because
+            # _tessellate_absolute verified every face has one.
+            cq.exporters.export(
+                shape, tmp_path, exportType=export_type,
+                tolerance=math.inf, angularTolerance=EXPORT_ANGULAR_TOLERANCE_RAD,
+            )
         with open(tmp_path, "rb") as f:
             return f.read()
     finally:
         os.unlink(tmp_path)
 
 
-# exec() + tessellation + export are CPU-bound and synchronous. Running them
-# inline in an async handler would block the uvicorn event loop for the whole
-# render, so /health and any concurrent request would hang behind it. We offload
-# the whole pipeline to a worker thread (to_thread) and bound the wait with
-# wait_for, which keeps the loop responsive and gives a hard ceiling even when
-# the in-thread timeout can't interrupt a long-running C call.
-WAIT_TIMEOUT = EXEC_TIMEOUT + 10
+# --- Process isolation ---
+# exec() + tessellation + export run in a child process per request, never in
+# this one. OCC holds the GIL through long C++ calls (booleans, fillets,
+# tessellation), so on a thread it froze the event loop, /health, and every
+# timeout, and a hung render held its slot forever. A process can be SIGKILLed
+# at the deadline whatever it is doing, and its slot is freed when it's reaped.
+#
+# Children come from a forkserver that preloads this module (cadquery, OCP,
+# numpy already imported), so a request pays a fork, not a ~1s import. Each
+# child runs exactly one pipeline and exits: the forkserver never runs user
+# code, so nothing a script tampers with (math.pi, cq.Workplane methods,
+# module caches) can reach the next request.
+_mp = multiprocessing.get_context("forkserver")
+# "__main__" too: otherwise every child re-runs the entry script (uvicorn's
+# CLI) before it can unpickle its task.
+_mp.set_forkserver_preload(["__main__", __name__])
 
-# Bound on concurrent pipeline executions. The in-thread timeout cannot
-# interrupt a blocking C call (OCC tessellation/boolean), so on the wait_for
-# path the worker thread is abandoned but keeps running until that C call
-# returns -- a leaked thread. We count a slot as occupied from submit until the
-# thread *actually* finishes (not until wait_for gives up), so a handful of hung
-# renders can't exhaust an unbounded pool: once MAX_CONCURRENT_RENDERS slots are
-# taken the worker sheds load with 503 and stays responsive instead of silently
-# queueing forever. The complete fix (hard-killing a hung render) needs process
-# isolation; this bounds and surfaces the blast radius in the meantime.
+# Environment for the forkserver, which is a fresh interpreter, so these apply
+# there even though numpy and OCC are already loaded here. RLIMIT_AS counts
+# reserved address space, and both runtimes reserve per thread they start:
+# - glibc gives each allocating thread its own 64 MB malloc arena. OCC runs
+#   booleans on a thread per host core, and 16 arenas blow a 1 GB cap within
+#   a 50-cut loop (segfault). Two arenas are plenty for one render.
+# - numpy's OpenMP BLAS starts a thread per host core on the first matrix op;
+#   under the cap that fails and aborts the child. Renders already run in
+#   parallel processes, so single-threaded BLAS also avoids oversubscription.
+os.environ["MALLOC_ARENA_MAX"] = "2"
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ[_var] = "1"
+
+# Bound on concurrent children. Over it the worker sheds load with 503 instead
+# of queueing. A slot is held until its child has exited (or been killed).
 MAX_CONCURRENT_RENDERS = int(os.environ.get("CAD_MAX_CONCURRENT_RENDERS", "4"))
 _inflight_lock = threading.Lock()
 _inflight = 0
+
+# Extra address space (MB) a child may map beyond what the preloaded forkserver
+# image already has. RLIMIT_AS counts virtual memory, and importing OCP alone
+# maps ~2.7 GB (mostly untouched reservations, ~370 MB resident), so an
+# absolute cap would be meaningless. The container memory limit still bounds
+# the sum over concurrent children.
+RENDER_MEMORY_MB = int(os.environ.get("CAD_RENDER_MEMORY_MB", "1024"))
+
+# One thread per slot (+1 for the /health probe) waits on its child. These
+# threads only block on a pipe, so they never hold the GIL for long.
+_render_executor = ThreadPoolExecutor(
+    max_workers=MAX_CONCURRENT_RENDERS + 1, thread_name_prefix="render-wait"
+)
 
 
 class PipelineError(Exception):
@@ -651,9 +793,12 @@ BUILD_VOLUME_MM = 256
 def _render_pipeline(code: str) -> dict:
     result, console_output = exec_user_code(code)
     try:
-        # volume is None when the result type couldn't be measured; the
-        # degenerate check must only reject a provably-empty body.
-        bbox, volume = compute_metrics(result)
+        # Normalize once, up front: an unexportable result type (None, a
+        # cq.Sketch, a list of Workplanes, ...) fails here with a fix-it message.
+        shape = as_export_shape(result)
+        # volume is None when a geometry call failed; the degenerate check
+        # must only reject a provably-empty body.
+        bbox, volume = compute_metrics(shape)
         if volume is not None and volume <= DEGENERATE_VOLUME_MM3:
             # NB: no "/" in this message. sanitize_error strips path-like
             # substrings and would mangle ".cut()/.intersect()".
@@ -663,7 +808,7 @@ def _render_pipeline(code: str) -> dict:
                 "`result` holds a 2D sketch instead of a solid. Rebuild so `result` "
                 "contains at least one solid with positive volume."
             )
-        stl_data = export_to_bytes(result, "STL", ".stl")
+        stl_data = export_to_bytes(shape, "STL", ".stl")
         stl_base64 = base64.b64encode(stl_data).decode("utf-8")
         warnings = validate_mesh(stl_data)
         if bbox["x"] > BUILD_VOLUME_MM or bbox["y"] > BUILD_VOLUME_MM:
@@ -691,7 +836,7 @@ def _render_pipeline(code: str) -> dict:
 def _threemf_pipeline(code: str) -> dict:
     result, console_output = exec_user_code(code)
     try:
-        data = export_to_bytes(result, "3MF", ".3mf")
+        data = export_to_bytes(as_export_shape(result), "3MF", ".3mf")
     except Exception as e:
         raise PipelineError(e, console_output) from e
     return {
@@ -733,9 +878,98 @@ def _error_detail(e: Exception) -> str:
     return error_msg
 
 
+def _apply_child_limits(memory_mb: int, cpu_seconds: int) -> None:
+    """Resource caps for a render child. RLIMIT_AS is relative to what the
+    preloaded image already maps (see RENDER_MEMORY_MB): past it, allocations
+    fail with MemoryError (or std::bad_alloc in OCC). RLIMIT_CPU is a backstop
+    for a child that outlives the parent's deadline kill (e.g. the parent
+    died): SIGXCPU at the soft limit, SIGKILL one second later. CPU time
+    sums over threads (OCC booleans are multi-threaded), hence the core
+    multiplier.
+
+    Linux only for the memory cap: without /proc (macOS dev runs) or where
+    RLIMIT_AS can't be lowered, the render runs without it rather than
+    failing every request."""
+    try:
+        with open("/proc/self/statm") as f:
+            mapped = int(f.read().split()[0]) * resource.getpagesize()
+        limit = mapped + memory_mb * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+    except (OSError, ValueError):
+        pass
+    resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds + 1))
+
+
+def _child_main(conn, pipeline, code: str, memory_mb: int, cpu_seconds: int) -> None:
+    """Entry point of a render child. Sends exactly one message: ("ok", payload)
+    or ("error", detail, traceback). The error detail is formatted here because
+    tracebacks (needed for the user's line number) don't pickle.
+
+    BaseException, not Exception: a KeyboardInterrupt (SIGINT to the process
+    group in a dev terminal) or SystemExit raised from library code must be
+    reported as an error, not surface as a silent "crashed" (out of memory)."""
+    try:
+        _apply_child_limits(memory_mb, cpu_seconds)
+        conn.send(("ok", pipeline(code)))
+    except BaseException as e:
+        conn.send(("error", _error_detail(e), traceback.format_exc()))
+    finally:
+        conn.close()
+
+
+def _noop_pipeline(code: str) -> dict:
+    return {}
+
+
+def _run_in_child(pipeline, code: str, timeout_s: float) -> tuple:
+    """Run `pipeline(code)` in a fresh child and wait at most `timeout_s`.
+    Blocking; call it off the event loop. Always reaps the child (SIGKILL if
+    still running) before returning, so the caller's slot can be freed.
+
+    Returns ("ok", payload), ("error", detail, traceback), ("timeout",), or
+    ("crashed", exitcode) when the child died without reporting (OOM kill,
+    OCC abort on a failed allocation, segfault)."""
+    recv_conn, send_conn = _mp.Pipe(duplex=False)
+    proc = _mp.Process(
+        target=_child_main,
+        args=(send_conn, pipeline, code, RENDER_MEMORY_MB, (int(timeout_s) + 5) * (os.cpu_count() or 1)),
+        daemon=True,
+    )
+    try:
+        proc.start()
+        send_conn.close()
+        if not recv_conn.poll(timeout_s):
+            return ("timeout",)
+        try:
+            return recv_conn.recv()
+        except EOFError:
+            proc.join()
+            if proc.exitcode == -signal.SIGXCPU:
+                return ("timeout",)
+            return ("crashed", proc.exitcode)
+    finally:
+        send_conn.close()
+        recv_conn.close()
+        if proc.pid is not None:
+            proc.kill()
+            proc.join()
+            proc.close()
+
+
+def _timeout_detail() -> str:
+    # Starts with the exact message the frontend has always received. No "/"
+    # in the hint: sanitize_error-style path stripping would mangle it.
+    return (
+        f"Code execution timed out. Renders are limited to {EXEC_TIMEOUT} seconds. "
+        "Common causes: many boolean operations (.union() or .cut()) inside a loop, "
+        "and fillets or chamfers on a complex body. Combine shapes into one boolean, "
+        "or fillet simpler geometry before the booleans."
+    )
+
+
 async def _execute_pipeline(pipeline, code: str, req_id: str, label: str) -> dict:
-    """Run a render/export pipeline on a worker thread with bounded concurrency
-    and a hard wall-clock ceiling. Raises HTTPException(400/503) on failure;
+    """Run a render/export pipeline in a child process with bounded concurrency
+    and a hard wall-clock deadline. Raises HTTPException(400/503) on failure;
     returns the pipeline's payload dict on success.
 
     Shared by /render and /export-3mf so the concurrency bound, timeout mapping,
@@ -748,31 +982,48 @@ async def _execute_pipeline(pipeline, code: str, req_id: str, label: str) -> dic
             raise HTTPException(status_code=503, detail="Worker is busy. Please retry shortly.")
         _inflight += 1
 
-    future = asyncio.ensure_future(asyncio.to_thread(pipeline, code))
+    loop = asyncio.get_running_loop()
+    future = loop.run_in_executor(_render_executor, _run_in_child, pipeline, code, EXEC_TIMEOUT)
 
-    def _release(_):
-        # Decrement only when the thread truly finishes, even if wait_for has
-        # already abandoned it, so a leaked (hung-C-call) thread keeps holding
-        # its slot and counts toward the concurrency bound.
+    def _release(fut):
+        # Release when the waiting thread returns, i.e. once the child is
+        # reaped, even if this request was cancelled (client disconnect) first.
         global _inflight
         with _inflight_lock:
             _inflight -= 1
+        # Mark a start failure retrieved: if this request was cancelled,
+        # nothing else awaits `fut`, and asyncio would log "Future exception
+        # was never retrieved" at GC.
+        if not fut.cancelled():
+            fut.exception()
 
     future.add_done_callback(_release)
 
+    # shield: a cancelled request must not cancel the wait (the child runs to
+    # its deadline and still holds the slot until then).
     try:
-        # shield so a wait_for timeout cancels only our wait, not the underlying
-        # thread future (a thread can't be cancelled mid-run anyway).
-        return await asyncio.wait_for(asyncio.shield(future), timeout=WAIT_TIMEOUT)
-    except (asyncio.TimeoutError, ExecTimeoutError):
-        # asyncio.TimeoutError: wait_for ceiling hit (C call ignored the in-thread
-        # timeout). ExecTimeoutError: the in-thread timeout interrupted a pure-Python
-        # loop. Both are timeouts -> the same clean message.
-        logger.error("[%s] %s timed out after %ds", req_id, label, WAIT_TIMEOUT)
-        raise HTTPException(status_code=400, detail="Code execution timed out.")
-    except Exception as e:
-        logger.error("[%s] %s failed: %s", req_id, label, traceback.format_exc())
-        raise HTTPException(status_code=400, detail=_error_detail(e))
+        outcome = await asyncio.shield(future)
+    except Exception:
+        # Could not start a child at all (forkserver gone, fork failed).
+        logger.error("[%s] %s could not start: %s", req_id, label, traceback.format_exc())
+        raise HTTPException(status_code=503, detail="Worker is unavailable. Please retry shortly.")
+    status = outcome[0]
+    if status == "ok":
+        return outcome[1]
+    if status == "timeout":
+        logger.error("[%s] %s timed out after %ds, child killed", req_id, label, EXEC_TIMEOUT)
+        raise HTTPException(status_code=400, detail=_timeout_detail())
+    if status == "crashed":
+        logger.error("[%s] %s child died (exit code %s)", req_id, label, outcome[1])
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Rendering crashed, most likely by running out of memory "
+                f"(limit {RENDER_MEMORY_MB} MB). Simplify the model or reduce repeated features."
+            ),
+        )
+    logger.error("[%s] %s failed: %s", req_id, label, outcome[2])
+    raise HTTPException(status_code=400, detail=outcome[1])
 
 
 @app.post("/render", response_model=RenderResponse)
@@ -817,6 +1068,45 @@ async def export_3mf(
     return payload
 
 
+# /health forks a no-op child, so it fails when renders can't actually run
+# (forkserver dead, fork or memory exhausted), not just when this process is up.
+# One probe at a time, reused for a few seconds, so polling can't fork-bomb.
+# The timeout stays under the compose healthcheck's 5 s. The forkserver is
+# started at boot (_lifespan), so a probe normally costs one fork (~18 ms).
+HEALTH_PROBE_TIMEOUT = 4
+_HEALTH_CACHE_SECONDS = 5.0
+_health_lock = asyncio.Lock()
+_health_last: Optional[tuple[float, bool]] = None
+
+
+async def _health_ok() -> bool:
+    global _health_last
+    # While a probe runs, answer from the previous one instead of queueing
+    # behind it: the frontend's ping gives up after 2 s, and a queued caller
+    # would wait out the whole probe first.
+    if _health_lock.locked() and _health_last is not None:
+        return _health_last[1]
+    async with _health_lock:
+        if _health_last is None or time.monotonic() - _health_last[0] > _HEALTH_CACHE_SECONDS:
+            loop = asyncio.get_running_loop()
+            try:
+                outcome = await loop.run_in_executor(
+                    _render_executor, _run_in_child, _noop_pipeline, "", HEALTH_PROBE_TIMEOUT
+                )
+            except Exception as e:
+                outcome = ("unstartable", repr(e))
+            if outcome[0] != "ok":
+                logger.error("health probe failed: %s", outcome[:2])
+            _health_last = (time.monotonic(), outcome[0] == "ok")
+        return _health_last[1]
+
+
 @app.get("/health")
-def health():
-    return {"status": "ok"}
+async def health():
+    ok = await _health_ok()
+    body = {
+        "status": "ok" if ok else "unavailable",
+        "inflight": _inflight,
+        "capacity": MAX_CONCURRENT_RENDERS,
+    }
+    return JSONResponse(body, status_code=200 if ok else 503)
