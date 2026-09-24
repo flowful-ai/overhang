@@ -10,7 +10,8 @@ import { useToasts } from "./toasts";
 import { triggerBlobDownload } from "./download";
 import { useDesignSession } from "./design-session";
 
-// Full-screen code editor dialog with copy / save / re-render actions.
+// Code editor dialog with copy / save / re-render actions. Full-screen on
+// phones, where the actions collapse to icons so Close stays on-screen.
 export default function CodeEditorModal({
   open, onClose, isRunning,
 }: {
@@ -47,28 +48,30 @@ export default function CodeEditorModal({
       open={open}
       onClose={onClose}
       labelledBy="code-editor-title"
-      className="bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-[90vw] h-[85vh] max-w-5xl flex flex-col overflow-hidden"
+      className="bg-white dark:bg-gray-900 sm:rounded-2xl shadow-2xl w-full h-dvh sm:w-[90vw] sm:h-[85vh] max-w-5xl flex flex-col overflow-hidden"
     >
-      <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-800">
-        <h2 id="code-editor-title" className="text-lg font-semibold text-gray-800 dark:text-gray-100">
-          Code Editor {isModified && <span className="text-amber-500 dark:text-amber-400 text-sm font-normal ml-2">(modified)</span>}
+      <div className="flex flex-wrap items-center justify-between gap-2 px-3 sm:px-6 py-3 sm:py-4 border-b border-gray-200 dark:border-gray-800">
+        <h2 id="code-editor-title" className="min-w-0 text-base sm:text-lg font-semibold text-gray-800 dark:text-gray-100 whitespace-nowrap">
+          Code Editor {isModified && <span className="text-amber-500 dark:text-amber-400 text-sm font-normal ml-1 sm:ml-2" title="Modified"><span className="sm:hidden">*</span><span className="hidden sm:inline">(modified)</span></span>}
         </h2>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 sm:gap-2 ml-auto">
           <button
             onClick={handleCopyCode}
-            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+            className="flex items-center gap-2 p-2 sm:px-3 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
             title="Copy code to clipboard"
+            aria-label={codeCopied ? "Copied" : "Copy code"}
           >
             {codeCopied ? <Check className="w-4 h-4 text-green-600 dark:text-green-400" /> : <Copy className="w-4 h-4" />}
-            {codeCopied ? "Copied" : "Copy"}
+            <span className="hidden sm:inline">{codeCopied ? "Copied" : "Copy"}</span>
           </button>
           <button
             onClick={handleSaveCode}
-            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+            className="flex items-center gap-2 p-2 sm:px-3 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
             title="Download as model.py"
+            aria-label="Save as model.py"
           >
             <Download className="w-4 h-4" />
-            Save
+            <span className="hidden sm:inline">Save</span>
           </button>
           <RerenderButton
             onClick={async () => {
@@ -80,7 +83,7 @@ export default function CodeEditorModal({
             disabled={isRendering || isRunning}
             title="Re-render and close"
             iconClassName="w-4 h-4"
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+            className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-all ${
               !(isRendering || isRunning) ? "bg-primary-600 hover:bg-primary-700 text-white" : "bg-gray-200 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed"
             }`}
           />

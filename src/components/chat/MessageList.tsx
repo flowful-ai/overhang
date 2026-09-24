@@ -30,6 +30,10 @@ const EXAMPLE_PROMPTS = [
   "GoPro 1/4-20 tripod adapter",
 ];
 
+// How close to the bottom (px) the chat must be scrolled for new content to
+// keep it pinned there.
+const AUTOSCROLL_THRESHOLD_PX = 80;
+
 const MARKDOWN_COMPONENTS = {
   p: (props: React.HTMLAttributes<HTMLParagraphElement>) => <p className="my-1.5 first:mt-0 last:mb-0" {...props} />,
   ul: (props: React.HTMLAttributes<HTMLUListElement>) => <ul className="my-1.5 list-disc pl-5 space-y-0.5" {...props} />,
@@ -276,17 +280,55 @@ export default function MessageList({
     setExpandedCodeIds(new Set());
   }
 
-  // Scroll to the latest message.
+  // Follow the conversation, but only while the user is at (or near) the
+  // bottom: streamed tokens must not yank someone reading an earlier message
+  // back down. A message the user just sent always scrolls into view.
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const nearBottomRef = useRef(true);
+  const lastScrollTopRef = useRef(0);
+  // Our own scrolls only ever move down, so only an upward scroll (the user)
+  // can stop the following; getting back near the bottom resumes it. This
+  // needs no scrollend event to tell our smooth scroll apart from the user's
+  // (Safari lacks it, and a scroll that moves nothing never fires it).
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight <= AUTOSCROLL_THRESHOLD_PX) {
+      nearBottomRef.current = true;
+    } else if (el.scrollTop < lastScrollTopRef.current) {
+      nearBottomRef.current = false;
+    }
+    lastScrollTopRef.current = el.scrollTop;
+  }, []);
+
   const firstScrollRef = useRef(true);
+  const prevCountRef = useRef(messages.length);
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({
-      behavior: firstScrollRef.current ? "instant" : "smooth",
-    });
+    const isNewMessage = messages.length !== prevCountRef.current;
+    prevCountRef.current = messages.length;
+    // A restored thread is imported after mount, so the list first renders
+    // empty: keep the first real scroll instant rather than animating through
+    // the whole history.
+    if (messages.length === 0) {
+      firstScrollRef.current = true;
+      return;
+    }
+    const userJustSent = isNewMessage && messages[messages.length - 1]?.role === "user";
+    if (!firstScrollRef.current && !userJustSent && !nearBottomRef.current) return;
+    // Smooth only for a new message; streamed tokens jump, so the view keeps
+    // up without a long-running animation.
+    const smooth = !firstScrollRef.current && isNewMessage;
     firstScrollRef.current = false;
+    nearBottomRef.current = true;
+    messagesEndRef.current?.scrollIntoView({ behavior: smooth ? "smooth" : "instant" });
   }, [messages]);
 
   return (
-    <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4">
+    <div
+      ref={scrollContainerRef}
+      onScroll={handleScroll}
+      className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4"
+    >
       {messages.length === 0 && (
         <div className="space-y-3">
           <div className="flex items-start gap-3 p-4 bg-primary-50 dark:bg-primary-950/40 rounded-xl">

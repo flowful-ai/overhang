@@ -72,8 +72,8 @@ export default function ParametersPanel({
         <span>Parameters ({params.length}){dirty ? <span className="text-amber-500 ml-1">*</span> : null}</span>
       </button>
       {expanded && (
-        <div id={contentId} className="border-t border-gray-100 dark:border-gray-800 w-72">
-          <div className="p-2 max-h-80 overflow-y-auto space-y-2">
+        <div id={contentId} className="border-t border-gray-100 dark:border-gray-800 w-[calc(100vw-4rem)] sm:w-72">
+          <div className="p-2 max-h-[40dvh] sm:max-h-80 overflow-y-auto space-y-2">
             {params.map(p => (
               <SliderRow
                 key={p.name}
