@@ -22,11 +22,13 @@ import traceback
 import asyncio
 import ctypes
 import multiprocessing
+import multiprocessing.forkserver
 import resource
 import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 
 # Ensure module-level logger output is visible (uvicorn's default config does
 # not propagate application loggers by default).
@@ -36,7 +38,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+
+@asynccontextmanager
+async def _lifespan(_app):
+    # Start the render forkserver (~1.3 s: it imports cadquery) at boot instead
+    # of inside the first /health probe or render, which would otherwise pay
+    # it against its deadline (the frontend's /health ping gives up after 2 s).
+    # Runs in the API process only: the forkserver imports this module too,
+    # but never runs the app's lifespan.
+    try:
+        await asyncio.to_thread(multiprocessing.forkserver.ensure_running)
+    except Exception:
+        logger.exception("render forkserver failed to start; /health will report it")
+    yield
+
+
+app = FastAPI(lifespan=_lifespan)
 
 # CORS configuration - restrict in production by setting ALLOWED_ORIGINS env var
 # Example: ALLOWED_ORIGINS=https://myapp.com,https://www.myapp.com
@@ -504,12 +521,11 @@ def exec_user_code(code: str) -> tuple[object, str]:
     Raises on failure. Used by both /render and /export-3mf.
 
     User print() output is captured by injecting a buffer-bound `print` into
-    this call's sandbox builtins, NOT via contextlib.redirect_stdout. Redirect
-    swaps the *process-global* sys.stdout, which is unsafe now that execs run
-    concurrently on worker threads (asyncio.to_thread): two requests would
-    cross-contaminate each other's console output and race the restore. A
-    per-call print keeps each request's output isolated. Sandboxed code has no
-    access to `sys`, so replacing `print` captures everything it can emit.
+    this call's sandbox builtins, NOT via contextlib.redirect_stdout, which
+    swaps the process-global sys.stdout. A per-call print scopes the output to
+    this exec without touching global state, wherever it runs (a render child,
+    or in-process in the tests). Sandboxed code has no access to `sys`, so
+    replacing `print` captures everything it can emit.
     """
     console_buf = io.StringIO()
 
@@ -731,22 +747,33 @@ def _apply_child_limits(memory_mb: int, cpu_seconds: int) -> None:
     for a child that outlives the parent's deadline kill (e.g. the parent
     died): SIGXCPU at the soft limit, SIGKILL one second later. CPU time
     sums over threads (OCC booleans are multi-threaded), hence the core
-    multiplier."""
-    with open("/proc/self/statm") as f:
-        mapped = int(f.read().split()[0]) * resource.getpagesize()
-    limit = mapped + memory_mb * 1024 * 1024
-    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+    multiplier.
+
+    Linux only for the memory cap: without /proc (macOS dev runs) or where
+    RLIMIT_AS can't be lowered, the render runs without it rather than
+    failing every request."""
+    try:
+        with open("/proc/self/statm") as f:
+            mapped = int(f.read().split()[0]) * resource.getpagesize()
+        limit = mapped + memory_mb * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+    except (OSError, ValueError):
+        pass
     resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds + 1))
 
 
 def _child_main(conn, pipeline, code: str, memory_mb: int, cpu_seconds: int) -> None:
     """Entry point of a render child. Sends exactly one message: ("ok", payload)
     or ("error", detail, traceback). The error detail is formatted here because
-    tracebacks (needed for the user's line number) don't pickle."""
+    tracebacks (needed for the user's line number) don't pickle.
+
+    BaseException, not Exception: a KeyboardInterrupt (SIGINT to the process
+    group in a dev terminal) or SystemExit raised from library code must be
+    reported as an error, not surface as a silent "crashed" (out of memory)."""
     try:
         _apply_child_limits(memory_mb, cpu_seconds)
         conn.send(("ok", pipeline(code)))
-    except Exception as e:
+    except BaseException as e:
         conn.send(("error", _error_detail(e), traceback.format_exc()))
     finally:
         conn.close()
@@ -820,12 +847,17 @@ async def _execute_pipeline(pipeline, code: str, req_id: str, label: str) -> dic
     loop = asyncio.get_running_loop()
     future = loop.run_in_executor(_render_executor, _run_in_child, pipeline, code, EXEC_TIMEOUT)
 
-    def _release(_):
+    def _release(fut):
         # Release when the waiting thread returns, i.e. once the child is
         # reaped, even if this request was cancelled (client disconnect) first.
         global _inflight
         with _inflight_lock:
             _inflight -= 1
+        # Mark a start failure retrieved: if this request was cancelled,
+        # nothing else awaits `fut`, and asyncio would log "Future exception
+        # was never retrieved" at GC.
+        if not fut.cancelled():
+            fut.exception()
 
     future.add_done_callback(_release)
 
@@ -901,16 +933,21 @@ async def export_3mf(
 # /health forks a no-op child, so it fails when renders can't actually run
 # (forkserver dead, fork or memory exhausted), not just when this process is up.
 # One probe at a time, reused for a few seconds, so polling can't fork-bomb.
-# The timeout stays under the compose healthcheck's 5 s.
+# The timeout stays under the compose healthcheck's 5 s. The forkserver is
+# started at boot (_lifespan), so a probe normally costs one fork (~18 ms).
 HEALTH_PROBE_TIMEOUT = 4
 _HEALTH_CACHE_SECONDS = 5.0
 _health_lock = asyncio.Lock()
 _health_last: Optional[tuple[float, bool]] = None
 
 
-@app.get("/health")
-async def health():
+async def _health_ok() -> bool:
     global _health_last
+    # While a probe runs, answer from the previous one instead of queueing
+    # behind it: the frontend's ping gives up after 2 s, and a queued caller
+    # would wait out the whole probe first.
+    if _health_lock.locked() and _health_last is not None:
+        return _health_last[1]
     async with _health_lock:
         if _health_last is None or time.monotonic() - _health_last[0] > _HEALTH_CACHE_SECONDS:
             loop = asyncio.get_running_loop()
@@ -923,7 +960,12 @@ async def health():
             if outcome[0] != "ok":
                 logger.error("health probe failed: %s", outcome[:2])
             _health_last = (time.monotonic(), outcome[0] == "ok")
-        ok = _health_last[1]
+        return _health_last[1]
+
+
+@app.get("/health")
+async def health():
+    ok = await _health_ok()
     body = {
         "status": "ok" if ok else "unavailable",
         "inflight": _inflight,

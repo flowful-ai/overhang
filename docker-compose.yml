@@ -87,7 +87,9 @@ services:
     mem_limit: 2560m
     cpus: 2.0
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      # env -u: the probe runs as the render children's uid, so with the secret
+      # in its environment a render could read it from /proc/<pid>/environ.
+      test: ["CMD", "env", "-u", "WORKER_SECRET", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
       timeout: 5s
       retries: 3
