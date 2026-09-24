@@ -285,24 +285,34 @@ export default function MessageList({
   // back down. A message the user just sent always scrolls into view.
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const nearBottomRef = useRef(true);
-  // Set while our own smooth scroll animates, so its intermediate scroll
-  // events aren't mistaken for the user scrolling away.
-  const autoScrollingRef = useRef(false);
+  const lastScrollTopRef = useRef(0);
+  // Our own scrolls only ever move down, so only an upward scroll (the user)
+  // can stop the following; getting back near the bottom resumes it. This
+  // needs no scrollend event to tell our smooth scroll apart from the user's
+  // (Safari lacks it, and a scroll that moves nothing never fires it).
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
-    if (!el || autoScrollingRef.current) return;
-    nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= AUTOSCROLL_THRESHOLD_PX;
+    if (!el) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight <= AUTOSCROLL_THRESHOLD_PX) {
+      nearBottomRef.current = true;
+    } else if (el.scrollTop < lastScrollTopRef.current) {
+      nearBottomRef.current = false;
+    }
+    lastScrollTopRef.current = el.scrollTop;
   }, []);
-  const handleScrollEnd = useCallback(() => {
-    autoScrollingRef.current = false;
-    handleScroll();
-  }, [handleScroll]);
 
   const firstScrollRef = useRef(true);
   const prevCountRef = useRef(messages.length);
   useEffect(() => {
     const isNewMessage = messages.length !== prevCountRef.current;
     prevCountRef.current = messages.length;
+    // A restored thread is imported after mount, so the list first renders
+    // empty: keep the first real scroll instant rather than animating through
+    // the whole history.
+    if (messages.length === 0) {
+      firstScrollRef.current = true;
+      return;
+    }
     const userJustSent = isNewMessage && messages[messages.length - 1]?.role === "user";
     if (!firstScrollRef.current && !userJustSent && !nearBottomRef.current) return;
     // Smooth only for a new message; streamed tokens jump, so the view keeps
@@ -310,7 +320,6 @@ export default function MessageList({
     const smooth = !firstScrollRef.current && isNewMessage;
     firstScrollRef.current = false;
     nearBottomRef.current = true;
-    autoScrollingRef.current = smooth;
     messagesEndRef.current?.scrollIntoView({ behavior: smooth ? "smooth" : "instant" });
   }, [messages]);
 
@@ -318,7 +327,6 @@ export default function MessageList({
     <div
       ref={scrollContainerRef}
       onScroll={handleScroll}
-      onScrollEnd={handleScrollEnd}
       className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4"
     >
       {messages.length === 0 && (

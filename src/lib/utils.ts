@@ -1,24 +1,22 @@
 import { z } from "zod";
 
 /**
- * Decode a base64 string to a Blob
+ * Decode a base64 string to bytes
  */
-export function base64ToBlob(base64: string, mimeType: string = "application/octet-stream"): Blob {
+export function base64ToBytes(base64: string): Uint8Array<ArrayBuffer> {
   const binaryString = window.atob(base64);
   const bytes = new Uint8Array(binaryString.length);
   for (let i = 0; i < binaryString.length; i++) {
     bytes[i] = binaryString.charCodeAt(i);
   }
-  return new Blob([bytes], { type: mimeType });
+  return bytes;
 }
 
 /**
- * Decode a base64 string and create an object URL
- * Remember to call URL.revokeObjectURL when done
+ * Decode a base64 string to a Blob
  */
-export function base64ToObjectUrl(base64: string, mimeType: string = "application/octet-stream"): string {
-  const blob = base64ToBlob(base64, mimeType);
-  return URL.createObjectURL(blob);
+export function base64ToBlob(base64: string, mimeType: string = "application/octet-stream"): Blob {
+  return new Blob([base64ToBytes(base64)], { type: mimeType });
 }
 
 /**

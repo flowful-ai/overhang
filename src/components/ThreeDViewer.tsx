@@ -6,7 +6,7 @@ import { OrbitControls, GizmoHelper, GizmoViewport, PerspectiveCamera } from "@r
 import * as THREE from "three";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 import { RotateCcw, Grid3X3, Boxes, AlertTriangle } from "lucide-react";
-import { BUILD_VOLUME_MM } from "@/lib/utils";
+import { base64ToBytes, BUILD_VOLUME_MM } from "@/lib/utils";
 import { captureSnapshot } from "./chat/snapshot";
 
 // OrbitControls ref: we only use these members so we type them explicitly.
@@ -54,10 +54,7 @@ function placeOnBuildPlate(g: THREE.BufferGeometry) {
  * which holds one never-evicted entry per URL: every render leaked one.
  */
 function parseStl(stlBase64: string): THREE.BufferGeometry {
-  const binary = window.atob(stlBase64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  const g = new STLLoader().parse(bytes.buffer);
+  const g = new STLLoader().parse(base64ToBytes(stlBase64).buffer);
   placeOnBuildPlate(g);
   g.computeVertexNormals();
   return g;

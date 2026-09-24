@@ -9,6 +9,14 @@ interface Props {
   onReset?: () => void;
 }
 
+// A failed code-split chunk (e.g. the lazy 3D viewer on a flaky connection) is
+// cached by the bundler for the life of the page, so re-mounting only replays
+// the error; a full reload is the only real retry.
+function isChunkLoadError(error: Error | null): boolean {
+  if (!error) return false;
+  return error.name === "ChunkLoadError" || /loading (css )?chunk|failed to (load|fetch dynamically imported)/i.test(error.message);
+}
+
 interface State {
   hasError: boolean;
   error: Error | null;
@@ -29,6 +37,10 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   handleReset = () => {
+    if (isChunkLoadError(this.state.error)) {
+      window.location.reload();
+      return;
+    }
     this.setState({ hasError: false, error: null });
     this.props.onReset?.();
   };
@@ -58,7 +70,7 @@ export class ErrorBoundary extends Component<Props, State> {
               className="inline-flex items-center gap-2 px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-lg transition-colors"
             >
               <RefreshCw className="w-4 h-4" />
-              Try Again
+              {isChunkLoadError(this.state.error) ? "Reload page" : "Try Again"}
             </button>
           </div>
         </div>

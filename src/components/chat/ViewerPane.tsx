@@ -20,9 +20,10 @@ import { useDesignSession } from "./design-session";
 // open state; dismissal (outside click and Escape) is handled locally by
 // usePopoverDismiss.
 export default function ViewerPane({
-  mobileTab, isRunning, setPendingImage,
+  mobileTab, isDesktop, isRunning, setPendingImage,
 }: {
   mobileTab: "chat" | "model";
+  isDesktop: boolean;
   isRunning: boolean;
   setPendingImage: (img: string | null) => void;
 }) {
@@ -36,11 +37,12 @@ export default function ViewerPane({
   const viewerRef = useRef<ThreeDViewerRef>(null);
   const exportMenuRef = useRef<HTMLDivElement>(null);
 
-  // Load the viewer chunk as soon as an agent turn starts rather than when
-  // its first STL arrives.
+  // Load the viewer chunk as soon as a model is on its way (an agent turn, or
+  // a restored thread's automatic re-render) rather than when the STL arrives.
+  const expectingModel = isRunning || !!currentCode;
   useEffect(() => {
-    if (isRunning) preloadThreeDViewer();
-  }, [isRunning]);
+    if (expectingModel) preloadThreeDViewer();
+  }, [expectingModel]);
 
   // Parameters panel open state lives here so it survives the panel
   // remounting, and so the panel opens by itself the first time a model with
@@ -52,7 +54,7 @@ export default function ViewerPane({
   const hasParams = useMemo(() => parseParameters(workingCode).length > 0, [workingCode]);
   if (!paramsAutoOpened && hasParams && displayedStl) {
     setParamsAutoOpened(true);
-    setParamsExpanded(window.matchMedia("(min-width: 768px)").matches);
+    setParamsExpanded(isDesktop);
   } else if (paramsAutoOpened && !workingCode) {
     setParamsAutoOpened(false);
     setParamsExpanded(false);

@@ -474,6 +474,7 @@ function ChatInterfaceInner({
 
         <ViewerPane
           mobileTab={mobileTab}
+          isDesktop={isDesktop}
           isRunning={isRunning}
           setPendingImage={setPendingImage}
         />
