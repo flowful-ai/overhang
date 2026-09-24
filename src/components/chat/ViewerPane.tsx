@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, Camera, Save, ChevronDown } from "lucide-react";
-import ThreeDViewer, { ThreeDViewerRef } from "../ThreeDViewer";
+import type { ThreeDViewerRef } from "../ThreeDViewer";
+import ThreeDViewer, { preloadThreeDViewer } from "./lazy-three-viewer";
 import ErrorBoundary from "../ErrorBoundary";
 import ParametersPanel from "../ParametersPanel";
 import RerenderButton from "./RerenderButton";
@@ -26,7 +27,7 @@ export default function ViewerPane({
   setPendingImage: (img: string | null) => void;
 }) {
   const {
-    displayedStl, workingCode, setWorkingCode, isRendering, isModified, rerender, needsRerender, restoreFailed,
+    currentCode, displayedStl, workingCode, setWorkingCode, isRendering, isModified, rerender, needsRerender, restoreFailed,
   } = useDesignSession();
   const { toast } = useToasts();
 
@@ -35,16 +36,23 @@ export default function ViewerPane({
   const viewerRef = useRef<ThreeDViewerRef>(null);
   const exportMenuRef = useRef<HTMLDivElement>(null);
 
+  // Load the viewer chunk as soon as an agent turn starts rather than when
+  // its first STL arrives.
+  useEffect(() => {
+    if (isRunning) preloadThreeDViewer();
+  }, [isRunning]);
+
   // Parameters panel open state lives here so it survives the panel
   // remounting, and so the panel opens by itself the first time a model with
-  // parameters appears. After that the user's choice sticks until New Chat
-  // clears the working copy. Render-time adjustment, no effect.
+  // parameters appears (desktop only: on a phone it would cover most of the
+  // viewer). After that the user's choice sticks until New Chat clears the
+  // working copy. Render-time adjustment, no effect.
   const [paramsExpanded, setParamsExpanded] = useState(false);
   const [paramsAutoOpened, setParamsAutoOpened] = useState(false);
   const hasParams = useMemo(() => parseParameters(workingCode).length > 0, [workingCode]);
   if (!paramsAutoOpened && hasParams && displayedStl) {
     setParamsAutoOpened(true);
-    setParamsExpanded(true);
+    setParamsExpanded(window.matchMedia("(min-width: 768px)").matches);
   } else if (paramsAutoOpened && !workingCode) {
     setParamsAutoOpened(false);
     setParamsExpanded(false);
@@ -165,14 +173,22 @@ export default function ViewerPane({
     <div className={`${mobileTab === "model" ? "block" : "hidden"} md:block flex-1 bg-gray-100 dark:bg-gray-800 relative min-w-0`}>
       <div className="absolute inset-4 bg-white dark:bg-gray-900 rounded-2xl shadow-sm overflow-hidden border border-gray-200 dark:border-gray-800">
         <ErrorBoundary onReset={handleViewerReset}>
-          <ThreeDViewer key={viewerKey} ref={viewerRef} stlBase64={displayedStl || undefined}
-            emptyState={needsRerender ? restoreEmptyState : undefined}
-          />
+          {displayedStl ? (
+            // frameKey: the camera re-frames for each new agent design, not
+            // when a parameter edit re-renders the same one.
+            <ThreeDViewer key={viewerKey} ref={viewerRef} stlBase64={displayedStl} frameKey={currentCode} />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center bg-gray-50 dark:bg-gray-900 text-gray-400 dark:text-gray-400">
+              {needsRerender ? restoreEmptyState : <p>Your 3D design will appear here</p>}
+            </div>
+          )}
         </ErrorBoundary>
 
         {/* Stays visible (disabled) during a turn instead of vanishing. */}
         {displayedStl && workingCode && (
-          <div className="absolute top-4 left-4 z-10">
+          // Below sm the panel sits under the Snapshot/Export buttons instead
+          // of beside them, so expanding it never hides those controls.
+          <div className="absolute top-16 left-4 sm:top-4 z-10">
             <ParametersPanel
               code={workingCode}
               onCodeChange={setWorkingCode}

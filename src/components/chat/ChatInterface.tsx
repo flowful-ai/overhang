@@ -354,7 +354,7 @@ function ChatInterfaceInner({
 
   return (
     <DesignSessionProvider value={session}>
-    <div className="flex flex-col h-screen max-h-screen bg-gray-50 dark:bg-gray-950 overflow-hidden text-gray-800 dark:text-gray-100">
+    <div className="flex flex-col h-dvh max-h-dvh bg-gray-50 dark:bg-gray-950 overflow-hidden text-gray-800 dark:text-gray-100">
       <Header
         model={model}
         setModel={setModel}
