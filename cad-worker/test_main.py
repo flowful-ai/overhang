@@ -4,18 +4,22 @@ Run with: see the Tests section of CONTRIBUTING.md (test deps are installed
 into the container tmpfs at run time; WORKER_SECRET must be unset).
 Or locally in the cadquery conda env: `pytest cad-worker/test_main.py`
 """
+import io
 import os
 import subprocess
 import sys
 import threading
 import time
 
+import numpy as np
 import pytest
+import trimesh
 from fastapi.testclient import TestClient
 from main import (
     exec_user_code,
     validate_mesh,
     export_to_bytes,
+    as_export_shape,
     sanitize_error,
     SAFE_BUILTINS,
     _safe_import,
@@ -401,7 +405,7 @@ def test_concurrent_stdout_does_not_cross_contaminate():
 def test_stl_export_produces_bytes():
     import cadquery as cq
     result = cq.Workplane("XY").box(10, 10, 10)
-    data = export_to_bytes(result, "STL", ".stl")
+    data = export_to_bytes(as_export_shape(result), "STL", ".stl")
     assert len(data) > 0
     # Binary STL starts with an 80-byte header; ASCII STL starts with "solid"
     assert data[:5] == b"solid" or len(data) >= 84
@@ -410,7 +414,7 @@ def test_stl_export_produces_bytes():
 def test_3mf_export_produces_bytes():
     import cadquery as cq
     result = cq.Workplane("XY").box(10, 10, 10)
-    data = export_to_bytes(result, "3MF", ".3mf")
+    data = export_to_bytes(as_export_shape(result), "3MF", ".3mf")
     # 3MF is a ZIP archive, so starts with "PK"
     assert len(data) > 0
     assert data[:2] == b"PK"
@@ -423,7 +427,7 @@ def test_validate_mesh_clean_cylinder_no_thin_wall_warning():
     # A solid cylinder has no face pointing straight down (only the flat top
     # and bottom plus curved sides), and plenty of wall thickness.
     result = cq.Workplane("XY").circle(10).extrude(20)
-    stl = export_to_bytes(result, "STL", ".stl")
+    stl = export_to_bytes(as_export_shape(result), "STL", ".stl")
     warnings = validate_mesh(stl)
     assert not any("thin" in w.lower() for w in warnings)
     # Must be watertight
@@ -434,7 +438,7 @@ def test_validate_mesh_flags_very_thin_geometry():
     import cadquery as cq
     # 10mm x 10mm x 0.5mm plate — below the 1.2mm threshold
     result = cq.Workplane("XY").box(10, 10, 0.5)
-    stl = export_to_bytes(result, "STL", ".stl")
+    stl = export_to_bytes(as_export_shape(result), "STL", ".stl")
     warnings = validate_mesh(stl)
     assert any("thin" in w.lower() for w in warnings)
 
@@ -445,7 +449,7 @@ def test_validate_mesh_no_overhang_warning_for_flat_bottomed_box():
     # count as an overhang (it used to — 2 of a cube's 12 faces point straight
     # down, blowing the 5% threshold on every boxy part).
     result = cq.Workplane("XY").box(10, 10, 10)
-    stl = export_to_bytes(result, "STL", ".stl")
+    stl = export_to_bytes(as_export_shape(result), "STL", ".stl")
     warnings = validate_mesh(stl)
     assert not any("overhang" in w.lower() for w in warnings)
 
@@ -458,7 +462,7 @@ def test_validate_mesh_flags_genuine_overhang():
         cq.Workplane("XY").circle(5).extrude(20)
         .faces(">Z").workplane().circle(15).extrude(3)
     )
-    stl = export_to_bytes(result, "STL", ".stl")
+    stl = export_to_bytes(as_export_shape(result), "STL", ".stl")
     warnings = validate_mesh(stl)
     assert any("overhang" in w.lower() for w in warnings)
 
@@ -477,7 +481,7 @@ def test_validate_mesh_flags_small_overhang_on_large_part():
             .center(10, 0).box(15, 10, 3, centered=(True, True, False))
         )
     )
-    stl = export_to_bytes(result, "STL", ".stl")
+    stl = export_to_bytes(as_export_shape(result), "STL", ".stl")
     warnings = validate_mesh(stl)
     assert any("overhang" in w.lower() for w in warnings)
 
@@ -496,7 +500,7 @@ def test_validate_mesh_ignores_narrow_ring_ledge():
     ring_inner = (cq.Workplane("XY").workplane(offset=16)
                   .box(46, 26, 1.6, centered=(True, True, False)))
     result = outer.cut(inner).cut(ring_outer.cut(ring_inner))
-    stl = export_to_bytes(result, "STL", ".stl")
+    stl = export_to_bytes(as_export_shape(result), "STL", ".stl")
     warnings = validate_mesh(stl)
     assert not any("overhang" in w.lower() for w in warnings)
 
@@ -737,3 +741,179 @@ def test_render_endpoint_truncates_long_error_detail():
     detail = r.json()["detail"]
     assert detail.endswith("... [truncated]")
     assert len(detail) <= MAX_ERROR_DETAIL_CHARS + 20
+
+
+# --- Watertight check ignores OCC's zero-area pole/corner triangles ---
+
+@pytest.mark.parametrize("build", [
+    lambda cq: cq.Workplane("XY").box(30, 30, 30).edges().fillet(5),
+    lambda cq: cq.Workplane("XY").sphere(20),
+    # Revolved profile touching the axis: the apex collapses to a point.
+    lambda cq: (cq.Workplane("XZ").polyline([(0, 0), (10, 0), (0, 15)]).close()
+                .revolve(360, (0, 0, 0), (0, 1, 0))),
+], ids=["filleted_box", "sphere", "revolve_to_axis"])
+def test_validate_mesh_closed_solids_are_watertight(build):
+    # OCC emits 1-8 degenerate triangles at poles and fillet corners, which
+    # used to trip a false "Non-watertight mesh" warning on these solids.
+    import cadquery as cq
+    stl = export_to_bytes(as_export_shape(build(cq)), "STL", ".stl")
+    warnings = validate_mesh(stl)
+    assert not any("watertight" in w.lower() for w in warnings)
+
+
+def test_validate_mesh_still_flags_open_mesh():
+    # A cube with one face removed has a real hole: cleaning degenerate
+    # triangles must not hide it.
+    tm = trimesh.creation.box(extents=(10, 10, 10))
+    tm.update_faces(np.arange(1, len(tm.faces)))
+    buf = io.BytesIO()
+    tm.export(buf, file_type="stl")
+    warnings = validate_mesh(buf.getvalue())
+    assert any("watertight" in w.lower() for w in warnings)
+
+
+# --- Unexportable result types (as_export_shape) ---
+
+@pytest.mark.parametrize("code,expected", [
+    ("s = cq.Sketch().rect(10, 10)\nresult = s", ["cq.Sketch", "placeSketch", "extrude"]),
+    ("result = None", ["`result` is None"]),
+    ("result = [cq.Workplane('XY').box(5, 5, 5), cq.Workplane('XY').sphere(3)]",
+     ["list of Workplane", ".union(", "cq.Assembly"]),
+    ("result = 42", ["`result` is of type int"]),
+], ids=["sketch", "none", "list_of_workplanes", "int"])
+@pytest.mark.parametrize("endpoint", ["/render", "/export-3mf"])
+def test_endpoints_reject_unexportable_result_types(code, expected, endpoint):
+    # These used to "render OK" with volume 0 (Sketch) or fail with a cryptic
+    # TypeError or AttributeError from inside the exporter.
+    r = client.post(endpoint, json={"code": "import cadquery as cq\n" + code})
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    for fragment in expected:
+        assert fragment in detail
+
+
+def test_render_endpoint_accepts_list_of_shapes():
+    # A list of Shapes is unambiguous: it exports as one compound.
+    code = (
+        "import cadquery as cq\n"
+        "result = [cq.Workplane('XY').box(10, 10, 5).val(),\n"
+        "          cq.Workplane('XY').center(20, 0).box(10, 10, 5).val()]\n"
+    )
+    r = client.post("/render", json={"code": code})
+    assert r.status_code == 200
+    metrics = r.json()["metrics"]
+    assert abs(metrics["bbox"]["x"] - 30.0) < 0.1
+    assert abs(metrics["volume"] - 1000.0) < 1.0
+
+
+# --- EXPORT_TOLERANCE_MM is an absolute chordal deviation ---
+
+def test_export_tolerance_is_absolute_chordal_deviation():
+    import cadquery as cq
+    import main as worker_main
+    # A large cylinder, where the angular limit doesn't bind: every side
+    # facet's chord midpoint must sit within the (size-scaled) tolerance of
+    # the true r=100 circle. Relative meshing (the cq.exporters default) missed this.
+    shape = as_export_shape(cq.Workplane("XY").circle(100).extrude(10))
+    tolerance = worker_main.export_tolerance_mm(shape)
+    data = export_to_bytes(shape, "STL", ".stl")
+    tm = trimesh.load(io.BytesIO(data), file_type="stl", force="mesh")
+    side = np.abs(tm.face_normals[:, 2]) < 0.5
+    tri = tm.triangles[side][:, :, :2]
+    # All vertices lie on the circle, so the chord sag is how far inside it
+    # the deepest edge midpoint sits.
+    mids = (tri + np.roll(tri, -1, axis=1)) / 2
+    deviation = 100.0 - np.linalg.norm(mids, axis=2).min()
+    assert deviation <= tolerance * 1.05
+
+
+def _triangle_counts(result):
+    """(STL, 3MF) triangle counts for one result."""
+    import zipfile
+    stl = export_to_bytes(as_export_shape(result), "STL", ".stl")
+    tmf = export_to_bytes(as_export_shape(result), "3MF", ".3mf")
+    model = zipfile.ZipFile(io.BytesIO(tmf)).read("3D/3dmodel.model")
+    return int.from_bytes(stl[80:84], "little"), model.count(b"<triangle ")
+
+
+def test_export_tolerance_changes_output(monkeypatch):
+    import cadquery as cq
+    import main as worker_main
+    # Regression: with relative meshing, 0.1, 0.02 and 0.005 all produced
+    # identical output. A finer absolute tolerance must yield a denser mesh,
+    # and the 3MF must carry the same mesh as the STL (the 3MF writer used to
+    # silently re-mesh with relative tolerance).
+    counts = []
+    for tol in (0.1, 0.005):
+        monkeypatch.setattr(worker_main, "EXPORT_TOLERANCE_MM", tol)
+        stl_tris, tmf_tris = _triangle_counts(cq.Workplane("XY").sphere(20))
+        assert stl_tris == tmf_tris
+        counts.append(stl_tris)
+    assert counts[1] > counts[0] * 2
+
+
+def test_stl_export_is_binary():
+    import cadquery as cq
+    data = export_to_bytes(as_export_shape(cq.Workplane("XY").box(10, 10, 10)), "STL", ".stl")
+    # Binary STL: 80-byte header + uint32 count + 50 bytes per triangle.
+    n = int.from_bytes(data[80:84], "little")
+    assert len(data) == 84 + 50 * n
+
+
+def test_export_tolerance_scales_with_part_size():
+    import cadquery as cq
+    import main as worker_main
+    # Small parts get the full EXPORT_TOLERANCE_MM; large curved parts get a
+    # coarser deflection so the mesh stays within a sane triangle budget (a
+    # fixed 0.02 mm put sphere(120) at 60k triangles, 2.9 MB per render).
+    small = as_export_shape(cq.Workplane("XY").sphere(20))
+    large = as_export_shape(cq.Workplane("XY").sphere(120))
+    assert worker_main.export_tolerance_mm(small) == worker_main.EXPORT_TOLERANCE_MM
+    assert worker_main.export_tolerance_mm(large) > worker_main.EXPORT_TOLERANCE_MM
+    stl = export_to_bytes(large, "STL", ".stl")
+    assert int.from_bytes(stl[80:84], "little") < 10_000
+
+
+def test_3mf_keeps_disjoint_bodies_as_separate_objects():
+    import zipfile
+    import cadquery as cq
+    # The union of two disjoint boxes is one Workplane val that is itself a
+    # Compound. Nested in the export compound, the 3MF writer merged both
+    # bodies into a single object.
+    wp = cq.Workplane("XY").box(10, 10, 10).union(
+        cq.Workplane("XY").box(10, 10, 10).translate((30, 0, 0))
+    )
+    data = export_to_bytes(as_export_shape(wp), "3MF", ".3mf")
+    model = zipfile.ZipFile(io.BytesIO(data)).read("3D/3dmodel.model")
+    assert model.count(b"<mesh>") == 2
+
+
+def test_export_rejects_untriangulated_faces(monkeypatch):
+    import cadquery as cq
+    import main as worker_main
+    # If meshing leaves a face without triangulation, the STL writer would
+    # drop it and the 3MF writer (tolerance=inf) would re-mesh it with an
+    # infinite deflection. Both must fail loudly instead.
+    monkeypatch.setattr(worker_main, "BRepMesh_IncrementalMesh", lambda *a: None)
+    for export_type, suffix in (("STL", ".stl"), ("3MF", ".3mf")):
+        with pytest.raises(ValueError, match="could not be meshed"):
+            export_to_bytes(as_export_shape(cq.Workplane("XY").sphere(5)), export_type, suffix)
+
+
+def test_validate_mesh_keeps_collinear_slivers():
+    # A zero-area sliver with three distinct vertices can be needed to close a
+    # T-junction. Dropping it (as nondegenerate_faces() does) opened a false
+    # hole; only faces that repeat a vertex index may be removed.
+    tm = trimesh.creation.box(extents=(10, 10, 10))
+    verts = tm.vertices.tolist()
+    faces = tm.faces.tolist()
+    a, b, c = faces[0]
+    m = len(verts)
+    verts.append(((np.array(verts[a]) + np.array(verts[b])) / 2).tolist())
+    faces[0:1] = [[a, m, c], [m, b, c], [a, b, m]]
+    mesh = trimesh.Trimesh(verts, faces, process=False)
+    assert mesh.is_watertight
+    buf = io.BytesIO()
+    mesh.export(buf, file_type="stl")
+    warnings = validate_mesh(buf.getvalue())
+    assert not any("watertight" in w.lower() for w in warnings)
