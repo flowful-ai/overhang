@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { convertToModelMessages, createUIMessageStreamResponse, type ModelMessage, type UIMessageChunk } from "ai";
+import { createUIMessageStreamResponse, type ModelMessage, type UIMessageChunk } from "ai";
 import type { LanguageModelV3 } from "@ai-sdk/provider";
 import { z } from "zod";
 import { APP_CONSTANTS } from "@/lib/utils";
@@ -7,9 +7,11 @@ import { OMITTED_SNAPSHOT_TEXT } from "@/lib/constants";
 import { withRoute } from "@/lib/api-handler";
 import { sanitizeError, toSanitizedMessage } from "@/lib/sanitize-error";
 import { withGenerationLease } from "@/lib/in-flight";
+import { dataUrlMediaType } from "@/components/chat/strip-images";
 import {
   AGENT_TURN_TIMEOUT_MS,
   runAgentTurn,
+  toAgentModelMessages,
   validateAgentUIMessages,
   type AgentUIMessage,
   type AgentWorker,
@@ -28,11 +30,18 @@ const MAX_REQUEST_BYTES = 10 * 1024 * 1024;
 // Per-image ceiling, in decoded bytes, for the image the user is sending now.
 // A 1024px JPEG snapshot is a few hundred KB; this leaves room for a PNG from
 // an older client. Images in older turns are never rejected (see
-// dropUnusableHistoryImages).
+// applyHistoryImagePolicy).
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 // Hard cap on inbound history. The model's context window is the real
 // constraint; this is a defense-in-depth bound to reject malicious payloads.
 const MAX_HISTORY_MESSAGES = 200;
+// Ceiling on the model-bound conversation, in characters (text, tool calls and
+// tool results after the STL is stripped; the one image left is capped by
+// MAX_IMAGE_BYTES instead). The body cap alone would let ~10 MB of text through
+// to a paid model call. 300k characters is ~75k tokens: dozens of turns with
+// full scripts, well under every allowed model's context window. Old render
+// attempts are trimmed to fit first (fitToInputCap).
+export const MAX_MODEL_INPUT_CHARS = 300_000;
 
 // First pass: shape and role only. The full UIMessage structure is checked by
 // the AI SDK's validator in the handler. Only user and assistant turns are
@@ -82,23 +91,108 @@ function newestUserIndex(messages: AgentUIMessage[]): number {
   return -1;
 }
 
-// Older turns: saved chats can hold full-resolution PNG snapshots from before
-// the client shrank them. Rejecting those would 400 every later turn of the
-// chat forever, so unusable file parts in older messages are dropped and
-// replaced by one placeholder per message. The newest user message is the
-// caller's current input and is checked strictly in checkContentLimits.
-function dropUnusableHistoryImages(messages: AgentUIMessage[]): AgentUIMessage[] {
+// The server's image policy, in one pass. Only the newest user message keeps
+// its images: older user turns lose every file part (the client's own policy,
+// stripOlderImages, enforced here too so an older or modified client can't send
+// every snapshot of a long chat to the model), and assistant turns lose the
+// file parts that can't go to the model. Dropped parts leave one
+// OMITTED_SNAPSHOT_TEXT per message. Nothing in older turns is rejected: saved
+// chats can hold full-resolution PNGs from before the client shrank them, and a
+// 400 there would break every later turn of the chat. The newest user message
+// is the caller's current input and is checked strictly in checkContentLimits.
+function applyHistoryImagePolicy(messages: AgentUIMessage[]): AgentUIMessage[] {
   const newest = newestUserIndex(messages);
   return messages.map((m, i) => {
-    if (i === newest) return m;
-    const bad = (p: CadPart) => p.type === "file" && fileProblem(p) !== null;
-    if (!m.parts.some(bad)) return m;
-    const parts = m.parts.filter((p) => !bad(p));
+    if (i === newest) {
+      // assistant-ui labels every image image/png; snapshots are JPEG, so the
+      // model is told the data URL's own type.
+      if (!m.parts.some((p) => p.type === "file")) return m;
+      const parts = m.parts.map((p) => {
+        if (p.type !== "file") return p;
+        const actual = dataUrlMediaType(p.url);
+        return actual && actual !== p.mediaType ? { ...p, mediaType: actual } : p;
+      });
+      return { ...m, parts };
+    }
+    const drop = (p: CadPart) => p.type === "file" && (m.role === "user" || fileProblem(p) !== null);
+    if (!m.parts.some(drop)) return m;
+    const parts = m.parts.filter((p) => !drop(p));
     if (!parts.some((p) => p.type === "text" && p.text === OMITTED_SNAPSHOT_TEXT)) {
       parts.push({ type: "text", text: OMITTED_SNAPSHOT_TEXT });
     }
     return { ...m, parts };
   });
+}
+
+// Characters one model message sends to the model, images excluded.
+function messageChars(m: ModelMessage): number {
+  if (typeof m.content === "string") return m.content.length;
+  let n = 0;
+  for (const p of m.content) n += p.type === "file" || p.type === "image" ? 0 : JSON.stringify(p).length;
+  return n;
+}
+
+/** Stands in for the code and result of an old runCadquery call trimmed to fit MAX_MODEL_INPUT_CHARS. */
+export const OMITTED_ATTEMPT_TEXT = "[earlier attempt omitted]";
+// Turns (a user message and the replies after it) never trimmed, counted from
+// the newest.
+const KEEP_RECENT_TURNS = 2;
+
+// The newest successful runCadquery result: the basis the model edits (with
+// the user's hand edits, if any), so it is never trimmed.
+function basisToolCallId(messages: ModelMessage[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== "tool") continue;
+    for (let j = m.content.length - 1; j >= 0; j--) {
+      const p = m.content[j];
+      if (p.type !== "tool-result" || p.output.type !== "json") continue;
+      if ((p.output.value as { success?: unknown } | null)?.success === true) return p.toolCallId;
+    }
+  }
+  return undefined;
+}
+
+// Without this, a long design chat (a full script per render attempt) would
+// reach MAX_MODEL_INPUT_CHARS and 413 on every later request. Replaces the code
+// and result of the oldest runCadquery calls with OMITTED_ATTEMPT_TEXT, one
+// message at a time, until the conversation fits. Never trimmed: the last
+// KEEP_RECENT_TURNS turns, the basis call and its result, and all text. Returns
+// the messages (trimmed or not) and their size, which can still be over the cap.
+function fitToInputCap(messages: ModelMessage[]): { messages: ModelMessage[]; chars: number } {
+  const sizes = messages.map(messageChars);
+  let chars = sizes.reduce((a, b) => a + b, 0);
+  if (chars <= MAX_MODEL_INPUT_CHARS) return { messages, chars };
+
+  let recentStart = messages.length;
+  for (let turns = 0; recentStart > 0 && turns < KEEP_RECENT_TURNS; ) {
+    recentStart--;
+    if (messages[recentStart].role === "user") turns++;
+  }
+  const basis = basisToolCallId(messages);
+  const trimmed = [...messages];
+  for (let i = 0; i < recentStart && chars > MAX_MODEL_INPUT_CHARS; i++) {
+    const m = trimmed[i];
+    if (m.role === "assistant" && typeof m.content !== "string") {
+      const content = m.content.map((p) =>
+        p.type === "tool-call" && p.toolCallId !== basis ? { ...p, input: { code: OMITTED_ATTEMPT_TEXT } } : p,
+      );
+      trimmed[i] = { ...m, content };
+    } else if (m.role === "tool") {
+      const content = m.content.map((p) =>
+        p.type === "tool-result" && p.toolCallId !== basis
+          ? { ...p, output: { type: "text" as const, value: OMITTED_ATTEMPT_TEXT } }
+          : p,
+      );
+      trimmed[i] = { ...m, content };
+    } else {
+      continue;
+    }
+    const size = messageChars(trimmed[i]);
+    chars += size - sizes[i];
+    sizes[i] = size;
+  }
+  return { messages: trimmed, chars };
 }
 
 // Content rules the SDK validator doesn't know about. Returns an error message,
@@ -169,7 +263,7 @@ export function createGenerateCadPost(deps: GenerateCadDeps) {
         console.warn(`[${requestId}] rejected message history: ${validated.error.message.slice(0, 500)}`);
         return bad("Invalid message format.");
       }
-      const uiMessages = dropUnusableHistoryImages(validated.data);
+      const uiMessages = applyHistoryImagePolicy(validated.data);
       const limitError = checkContentLimits(uiMessages);
       if (limitError) return bad(limitError);
 
@@ -177,17 +271,27 @@ export function createGenerateCadPost(deps: GenerateCadDeps) {
       // (a failure is the client's 400), so it must not hold a slot.
       let modelMessages: ModelMessage[];
       try {
-        // A turn stopped mid tool call leaves tool parts with no result
-        // (input-streaming, or input-available with no output). Sent as-is,
-        // providers reject a tool call without its result, so drop them. Data
-        // parts are ignored by the converter.
-        modelMessages = await convertToModelMessages(uiMessages, { ignoreIncompleteToolCalls: true });
+        // Strips the STL from prior tool results and drops incomplete tool
+        // calls (see toAgentModelMessages). Data parts are ignored.
+        modelMessages = await toAgentModelMessages(uiMessages);
       } catch (e: unknown) {
         // Preserve the 400 contract: malformed UIMessages are a client error,
         // not a server fault that withRoute's catch-all should turn into a 500.
         // Same stable text as the validator path; the detail goes to the log.
         console.warn(`[${requestId}] message conversion failed: ${e instanceof Error ? e.message : String(e)}`);
         return bad("Invalid message format.");
+      }
+      const fitted = fitToInputCap(modelMessages);
+      modelMessages = fitted.messages;
+      const inputChars = fitted.chars;
+      if (inputChars > MAX_MODEL_INPUT_CHARS) {
+        console.warn(`[${requestId}] rejected oversized conversation: ${inputChars} model-bound characters`);
+        return NextResponse.json(
+          {
+            error: `Conversation too large for the model (${inputChars.toLocaleString("en-US")} of max ${MAX_MODEL_INPUT_CHARS.toLocaleString("en-US")} characters). Start a new chat to continue.`,
+          },
+          { status: 413 },
+        );
       }
 
       // Concurrency guard: a shared generation pool. The turn outlives this

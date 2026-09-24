@@ -1,6 +1,6 @@
 # Configuration
 
-Overhang reads its settings from `.env`, which `setup.sh` creates from `.env.example`. Restart with `docker compose up --build --remove-orphans` after a change.
+Overhang reads its settings from `.env`, which `setup.sh` creates from `.env.example`. Restart with `docker compose up -d --build --remove-orphans` after a change.
 
 ## Environment variables
 
@@ -43,4 +43,4 @@ A local install needs none of this. If you serve Overhang from a server or behin
 
 ## Upgrading from a version with accounts
 
-Postgres is no longer used. `docker compose up --remove-orphans` (what `setup.sh` runs) stops the old `postgres` container, but its data volume stays until you remove it by hand, after a backup if you want the old account data.
+Postgres is no longer used. `setup.sh` runs `docker compose up -d --build --wait --remove-orphans`, which stops the old `postgres` container, but its data volume stays until you remove it by hand, after a backup if you want the old account data.

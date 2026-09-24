@@ -510,7 +510,9 @@ def validate_mesh(stl_bytes: bytes) -> list[str]:
 # Strip internal filesystem paths from error messages before returning them to
 # the client. OCC/CadQuery tracebacks frequently include the conda env path.
 # Keep in sync with `sanitizeError` in src/lib/sanitize-error.ts
-_PATH_RE = re.compile(r"(?:/[\w.\-]+)+(?:\.py|\.so|\.cpp|\.h)?")
+# Absolute paths only (not after a word char, `.`, `)` or `]`; 2+ segments), so
+# arithmetic like `width/2` in a traceback line survives.
+_PATH_RE = re.compile(r"(?<![\w.)\]])(?:/[\w.\-]+){2,}(?:\.py|\.so|\.cpp|\.h)?")
 
 def sanitize_error(msg: str) -> str:
     return _PATH_RE.sub("<path>", msg)

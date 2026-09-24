@@ -17,6 +17,15 @@ describe("sanitizeError", () => {
     expect(out).not.toContain("/usr/local/lib");
   });
 
+  it("keeps division in the model's code intact", () => {
+    const raw = "ValueError at line 4: box(width/2, (a + b)/2, h /2, pts[0]/2, 1.5/2)";
+    expect(sanitizeError(raw)).toBe(raw);
+  });
+
+  it("strips quoted traceback paths", () => {
+    expect(sanitizeError('File "/srv/app/worker.py", line 5')).toBe('File "<path>", line 5');
+  });
+
   it("is a no-op on messages without paths", () => {
     expect(sanitizeError("ValueError: result must be defined")).toBe(
       "ValueError: result must be defined",
