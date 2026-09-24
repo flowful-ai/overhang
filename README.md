@@ -25,7 +25,7 @@ You need Docker and an [OpenRouter API key](https://openrouter.ai/keys).
 git clone https://github.com/flowful-ai/overhang && cd overhang && ./setup.sh
 ```
 
-`setup.sh` asks for your OpenRouter key, generates `WORKER_SECRET`, writes `.env` and starts everything with Docker Compose. Open http://localhost:3000.
+`setup.sh` asks for your OpenRouter key, generates `WORKER_SECRET`, writes `.env` and starts everything with Docker Compose in the background. Open http://localhost:3000. Follow the logs with `docker compose logs -f`; stop with `docker compose down`.
 
 ## Models
 

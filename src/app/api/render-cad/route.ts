@@ -10,10 +10,12 @@ import { CodeBodySchema } from "@/lib/utils";
 // the worker raw, so a pasted em-dash SyntaxError'd here but healed via chat).
 export const POST = withRoute(
   { rateKey: "render", rateLimit: 20, schema: CodeBodySchema },
-  async ({ code }, { requestId }) =>
+  async ({ code }, { requestId, signal }) =>
     // Callers share a global concurrency pool (MAX_CONCURRENT_RENDERS).
     withPoolSlot(RENDER_POOL, async () => {
-      const r = await renderCad(code, requestId);
+      // The request signal stops the worker call and its busy retries when the
+      // client disconnects, so a gone caller doesn't keep the pool slot.
+      const r = await renderCad(code, requestId, { signal });
       if (!r.success) {
         // renderCad already sanitized the message; return it directly in
         // withRoute's { error } shape rather than round-tripping through a

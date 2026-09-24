@@ -1,4 +1,4 @@
-import { tool } from "ai";
+import { tool, type JSONValue } from "ai";
 import { z } from "zod";
 import { APP_CONSTANTS, BUILD_VOLUME_MM } from "./utils";
 import { renderCad, type RenderWorker } from "./cad-render";
@@ -357,6 +357,10 @@ result = (
 # Bolt holes from the NON-inverted bottom workplane (pitfall 8).
 `;
 
+/** What the model sees when the worker stayed busy through renderCad's retries. */
+export const WORKER_BUSY_ERROR =
+  "CAD worker is busy (transient infrastructure condition, not a problem with the code). Resend the same code unchanged.";
+
 export interface RenderReport {
   code: string;
   bbox: BoundingBox;
@@ -390,7 +394,13 @@ export function createRunCadqueryTool({ requestId, worker, onRender }: RunCadque
     }),
     execute: async ({ code }, { abortSignal }): Promise<CadqueryToolResult> => {
       const r = await renderCad(code, requestId, { callWorker: worker, signal: abortSignal });
-      if (!r.success) return { success: false, code: r.code, error: r.error };
+      if (!r.success) {
+        // A 503 that outlasted renderCad's retries is load, not the code.
+        // Returned as a plain failure, the model "fixes" working code and burns
+        // steps.
+        const error = r.workerStatus === 503 ? WORKER_BUSY_ERROR : r.error;
+        return { success: false, code: r.code, error };
+      }
       const { x, y, z } = r.metrics.bbox;
       onRender?.({ code: r.code, bbox: { x, y, z }, warnings: r.warnings });
       const head = `Render OK. Bounding box: ${x.toFixed(1)}x${y.toFixed(1)}x${z.toFixed(1)}mm.`;
@@ -408,13 +418,24 @@ export function createRunCadqueryTool({ requestId, worker, onRender }: RunCadque
     // What the MODEL sees as the tool result. The full result (with the STL)
     // still streams to the UI, but the base64 STL must never enter the model
     // context: on a multi-step turn the SDK echoes prior tool results back to
-    // the model, and one medium STL is ~1M tokens of noise per follow-up step
-    // (the client already strips it between turns in strip-stl.ts; this covers
-    // the steps within a turn).
-    toModelOutput: ({ output }) => {
-      if (!output.success) return { type: "json", value: output };
-      const { stlBase64: _omit, ...forModel } = output;
-      return { type: "json", value: forModel };
-    },
+    // the model, and one medium STL is ~1M tokens of noise per follow-up step.
+    // The route converts inbound history with this tool too
+    // (toAgentModelMessages), so prior turns are covered whatever the client
+    // sent. `code` is replaced by a marker when it repeats the call's input,
+    // which it does unless the user edited the script or punctuation was
+    // normalized.
+    toModelOutput: ({ input, output }) => ({ type: "json", value: resultForModel(input, output) }),
   });
+}
+
+/** Stands in for a result's `code` that is identical to the call's input code. */
+export const SAME_CODE_AS_INPUT = "(identical to the code argument of this call)";
+
+/** A runCadquery result as the model sees it. Defensive: history outputs come from the client. */
+function resultForModel(input: unknown, output: CadqueryToolResult): JSONValue {
+  if (typeof output !== "object" || output === null) return (output ?? null) as JSONValue;
+  const { stlBase64: _omit, ...rest } = output as CadqueryToolResult & { stlBase64?: string };
+  const inputCode = (input as { code?: unknown } | undefined)?.code;
+  if (typeof inputCode === "string" && rest.code === inputCode) return { ...rest, code: SAME_CODE_AS_INPUT };
+  return rest as JSONValue;
 }
