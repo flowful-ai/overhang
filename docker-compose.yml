@@ -73,13 +73,18 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       # Max simultaneous renders in the worker; over it the worker returns 503.
       - CAD_MAX_CONCURRENT_RENDERS=${CAD_MAX_CONCURRENT_RENDERS:-4}
+      # Memory each render's child process may allocate, in MB.
+      - CAD_RENDER_MEMORY_MB=${CAD_RENDER_MEMORY_MB:-1024}
       - WORKER_SECRET=${WORKER_SECRET:?WORKER_SECRET must be set (generate with openssl rand -hex 32)}
+    # Each render runs in its own child process, forked from a preloaded
+    # forkserver (~200 MB on top of the API process). The container limit
+    # bounds all concurrent renders together; CAD_RENDER_MEMORY_MB caps each.
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 2560M
           cpus: "2.0"
-    mem_limit: 2g
+    mem_limit: 2560m
     cpus: 2.0
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]

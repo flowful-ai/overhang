@@ -10,8 +10,9 @@ Overhang reads its settings from `.env`, which `setup.sh` creates from `.env.exa
 | `WORKER_SECRET` | Yes (Compose) | unset | Shared secret between the frontend and the CAD worker, so nothing else on the Docker network can drive arbitrary Python execution. `docker-compose.yml` refuses to start without it; `setup.sh` generates it. Set the same value on both services. Generate with `openssl rand -hex 32`. |
 | `CAD_WORKER_URL` | No | `http://localhost:8000` | Python worker URL. Compose sets `http://cad-worker:8000`. |
 | `ALLOWED_ORIGINS` | No | `http://frontend:3000` | CORS allowlist for the worker (code fallback when unset is `*`). |
-| `EXEC_TIMEOUT` | No | `30` | Max CAD execution time, in seconds. |
+| `EXEC_TIMEOUT` | No | `30` | Max time for one render or 3MF export (script plus export), in seconds. Each render runs in its own process, which is killed at this deadline. |
 | `CAD_MAX_CONCURRENT_RENDERS` | No | `4` | Max simultaneous renders in the worker. Over it, the worker sheds load with 503. |
+| `CAD_RENDER_MEMORY_MB` | No | `1024` | Memory each render process may allocate on top of the preloaded CadQuery image. Over it the render fails with an out-of-memory error. Below about 512 some numpy and OCC operations stall. The worker container's memory limit (2560 MB in Compose) bounds all concurrent renders together. |
 | `TRUST_PROXY` | No | `0` (`.env.example`), `1` (Compose without a `.env` value) | Number of trusted proxies that append to `X-Forwarded-For`. See [Running behind a proxy](#running-behind-a-proxy). |
 | `TRUST_CF_CONNECTING_IP` | No | unset | `1` keys the rate limiter on `CF-Connecting-IP`. See [Cloudflare](#cloudflare). |
 | `FRONTEND_BIND` | No | `127.0.0.1` | Host interface Compose publishes port 3000 on. Keeps other machines off port 3000; it does not firewall your proxy. |
