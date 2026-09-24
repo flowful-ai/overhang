@@ -5,6 +5,8 @@ from typing import Optional
 import ast
 import builtins
 import cadquery as cq
+from OCP.BRepMesh import BRepMesh_IncrementalMesh
+from OCP.StlAPI import StlAPI_Writer
 import trimesh
 import numpy as np
 import math
@@ -248,17 +250,55 @@ class ThreeMFResponse(BaseModel):
     threemf_base64: str
     console_output: Optional[str] = None
 
-def _solids_of(result) -> Optional[list]:
-    """All solids in a result, or None when the type isn't measurable.
-    Assembly solids are measured as placed (toCompound applies Locations)."""
-    if isinstance(result, cq.Workplane):
-        return result.solids().vals()
+_RESULT_TYPES_HINT = "Assign `result` a cq.Workplane, a cq.Shape (e.g. from .val()) or a cq.Assembly."
+
+
+def as_export_shape(result) -> "cq.Shape":
+    """Normalize a user `result` to the single cq.Shape that gets measured and
+    exported, or raise a ValueError that tells the LLM how to fix it.
+
+    Anything that isn't a Workplane, Shape, Assembly or list of Shapes is a
+    hard error. Previously a cq.Sketch slipped through: it is iterable (its
+    faces), so the exporter happily meshed it while the volume check could not
+    measure it, and a flat 2D sketch "rendered OK" with volume 0.
+    NB: no "/" in these messages; sanitize_error strips path-like substrings.
+    """
+    if isinstance(result, cq.Shape):
+        return result
     if isinstance(result, cq.Assembly):
-        return result.toCompound().Solids()
-    if hasattr(result, "Solids"):
-        # cq.Solid / cq.Compound / cq.Shape (e.g. from a .val() call).
-        return result.Solids()
-    return None
+        # Solids measured and exported as placed (toCompound applies Locations).
+        return result.toCompound()
+    if isinstance(result, cq.Workplane):
+        return cq.Compound.makeCompound([v for v in result.vals() if isinstance(v, cq.Shape)])
+    if result is None:
+        raise ValueError(
+            "`result` is None. Check that the variable holds the final model (a "
+            "function that forgets to `return` its Workplane yields None). " + _RESULT_TYPES_HINT
+        )
+    if isinstance(result, cq.Sketch):
+        raise ValueError(
+            "`result` is a cq.Sketch, which is 2D and has no volume. Extrude it "
+            "(e.g. cq.Workplane('XY').placeSketch(s).extrude(h)) or assign a "
+            "cq.Workplane, cq.Shape or cq.Assembly."
+        )
+    if isinstance(result, (list, tuple)):
+        if result and all(isinstance(v, cq.Shape) for v in result):
+            return cq.Compound.makeCompound(list(result))
+        raise ValueError(
+            f"`result` is a {type(result).__name__} of "
+            f"{', '.join(sorted({type(v).__name__ for v in result})) or 'nothing'}. "
+            "Combine parts into one object: a.union(b) for a single body, or a "
+            "cq.Assembly for separate parts."
+        )
+    raise ValueError(f"`result` is a {type(result).__name__}, which can't be exported. " + _RESULT_TYPES_HINT)
+
+
+def _solids_of(result) -> Optional[list]:
+    """All solids in a result, or None when the type isn't measurable."""
+    try:
+        return as_export_shape(result).Solids()
+    except ValueError:
+        return None
 
 
 def compute_metrics(result) -> tuple[dict, Optional[float]]:
@@ -398,6 +438,14 @@ def validate_mesh(stl_bytes: bytes) -> list[str]:
         if not np.isfinite(tm.vertices).all():
             warnings.append("Invalid geometry: mesh contains NaN or infinite coordinates")
             return warnings
+
+        # OCC emits a few zero-area triangles where a face collapses to a point
+        # (sphere poles, fillet corners, revolves touching the axis). Their
+        # collapsed edges break trimesh's edge-pairing, so perfectly closed
+        # solids read as non-watertight. Drop them and weld coincident vertices
+        # before checking; genuine holes still leave unpaired edges.
+        tm.update_faces(tm.nondegenerate_faces())
+        tm.merge_vertices()
 
         if not tm.is_watertight:
             warnings.append("Non-watertight mesh: may cause slicing issues. Check for unclosed shells or boolean artifacts.")
@@ -574,28 +622,64 @@ def exec_user_code(code: str) -> tuple[object, str]:
     return exec_globals["result"], console_buf.getvalue()
 
 
-# Max chordal deviation of the export tessellation (mm), for both the preview
-# STL and the printable STL/3MF (they are the same bytes: the STL download
-# ships the render result). CadQuery's default of 0.1 leaves visible facets on
-# curved features and prints holes undersized beyond their intended clearance;
-# 0.02 is in the conventional range for slicer-bound meshes. Measured cost is
-# small — the 0.1 rad angular tolerance bounds curved-surface refinement
-# (vase STL 214 -> 295 KiB, export 24 -> 27 ms).
+# Max chordal deviation of the export tessellation, in absolute mm, for both
+# the preview STL and the printable STL/3MF (they are the same bytes: the STL
+# download ships the render result). CadQuery's default of 0.1 leaves visible
+# facets on curved features and prints holes undersized beyond their intended
+# clearance; 0.02 is in the conventional range for slicer-bound meshes.
+#
+# It must be applied as an ABSOLUTE deflection: cq.exporters.export() meshes
+# with relative=True, where the value is a fraction of each edge's length, so
+# with the angular limit dominating, 0.1, 0.02 and 0.005 produced
+# byte-identical STLs. export_to_bytes therefore meshes the shape itself.
 EXPORT_TOLERANCE_MM = 0.02
+
+# Max angle (radians) between adjacent facets on curved surfaces. 0.2 rad
+# (~11.5 deg, >= ~31 segments per full circle) keeps small holes and fillets
+# round, while EXPORT_TOLERANCE_MM governs above ~4mm radius. The old 0.1 rad
+# doubled the facets on every small curved feature below the chordal limit
+# anyway. Measured binary STL sizes vs the old relative meshing: sphere(20)
+# 390 -> 494 KiB, box(30).fillet(5) 461 -> 155 KiB, polar-flange eval fixture
+# 493 -> 234 KiB.
+EXPORT_ANGULAR_TOLERANCE_RAD = 0.2
+
+
+def _tessellate_absolute(shape: "cq.Shape") -> None:
+    """Mesh `shape` in place with an absolute EXPORT_TOLERANCE_MM deflection.
+
+    Both the STL and the 3MF writer then serialize this triangulation as-is
+    (see export_to_bytes for how the 3MF path is kept from re-meshing).
+    """
+    BRepMesh_IncrementalMesh(shape.wrapped, EXPORT_TOLERANCE_MM, False, EXPORT_ANGULAR_TOLERANCE_RAD, True)
 
 
 def export_to_bytes(result: object, export_type: str, suffix: str) -> bytes:
-    """Export a CadQuery result to bytes in the given format."""
-    # cq.exporters.export() does not accept cq.Assembly, but the system prompt
-    # tells the model to use Assembly for multi-part models. Flatten to a
-    # compound so multi-part results export as one mesh with parts positioned
-    # as placed.
-    if isinstance(result, cq.Assembly):
-        result = cq.Workplane(obj=result.toCompound())
+    """Export a CadQuery result to bytes in the given format ("STL" or "3MF")."""
+    # as_export_shape also flattens cq.Assembly (which cq.exporters can't take)
+    # to a compound, so multi-part results export as one mesh with parts
+    # positioned as placed.
+    shape = as_export_shape(result)
+    _tessellate_absolute(shape)
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp_path = tmp.name
     try:
-        cq.exporters.export(result, tmp_path, exportType=export_type, tolerance=EXPORT_TOLERANCE_MM)
+        if export_type == "STL":
+            writer = StlAPI_Writer()
+            writer.ASCIIMode = False
+            if not writer.Write(shape.wrapped, tmp_path):
+                raise ValueError("STL export failed: the shape has no tessellated faces.")
+        else:
+            # The 3MF writer tessellates via Shape.mesh(), which re-meshes
+            # (relative, i.e. the bug above) unless every face already has a
+            # triangulation whose recorded deflection is <= `tolerance`. OCC
+            # records its surface-deflection estimate there, which can exceed
+            # what was requested (0.041 for a 0.02 sphere mesh), so passing
+            # EXPORT_TOLERANCE_MM would silently discard our mesh. An infinite
+            # tolerance means "reuse the existing triangulation".
+            cq.exporters.export(
+                shape, tmp_path, exportType=export_type,
+                tolerance=math.inf, angularTolerance=EXPORT_ANGULAR_TOLERANCE_RAD,
+            )
         with open(tmp_path, "rb") as f:
             return f.read()
     finally:
@@ -649,6 +733,9 @@ BUILD_VOLUME_MM = 256
 def _render_pipeline(code: str) -> dict:
     result, console_output = exec_user_code(code)
     try:
+        # Normalize once, up front: an unexportable result type (None, a
+        # cq.Sketch, a list of Workplanes, ...) fails here with a fix-it message.
+        result = as_export_shape(result)
         # volume is None when the result type couldn't be measured; the
         # degenerate check must only reject a provably-empty body.
         bbox, volume = compute_metrics(result)
