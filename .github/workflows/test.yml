@@ -104,7 +104,29 @@ jobs:
         with:
           node-version: "24"
       # Dev dependencies are included: they run in CI and in the image build.
-      - run: npm audit --audit-level=high
+      # Fails on any high/critical advisory not listed in IGNORED. Each entry
+      # must say why it is safe and be removed once a patched version ships.
+      # - GHSA-vfj7-8cjw-p6xm (braces <=3.0.3, no fix released): only reached
+      #   via eslint-config-next > fast-glob, a lint-time dev dep globbing
+      #   static patterns from our own config.
+      - name: npm audit (high+, with allowlist)
+        env:
+          IGNORED: |
+            https://github.com/advisories/GHSA-vfj7-8cjw-p6xm
+        run: |
+          npm audit --json > audit.json || true
+          jq -e '.vulnerabilities' audit.json > /dev/null
+          ignored="$(printf '%s' "$IGNORED" | jq -R . | jq -s 'map(select(length > 0))')"
+          blocking="$(jq --argjson ignored "$ignored" '
+            [.vulnerabilities[].via[] | objects
+             | select(.severity == "high" or .severity == "critical")
+             | select(.url as $u | $ignored | index($u) | not)
+             | {name, severity, url}] | unique' audit.json)"
+          npm audit --audit-level=high || true
+          if [ "$blocking" != "[]" ]; then
+            echo "Blocking advisories:"; echo "$blocking"
+            exit 1
+          fi
 
   # Best-effort: pip-audit resolves the requirement files in a fresh venv, so
   # unpinned transitive deps float to their latest versions and the conda set
