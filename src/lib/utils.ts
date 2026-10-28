@@ -66,11 +66,16 @@ export const CodeBodySchema = z.object({
 // temperature: whether OpenRouter lists `temperature` in the model's
 // supported_parameters (GET /api/v1/models, checked 2026-09-24). Where it is
 // not listed, OpenRouter silently drops it, so the agent turn doesn't send it.
+//
+// imageInput: whether the model takes images (OpenRouter
+// architecture.input_modalities includes "image", checked 2026-10-28). Those
+// models get preview images of each render to check their result against the
+// request; the others get the text geometry report only.
 export const MODELS = [
-  { id: "openai/gpt-6-luna", name: "GPT-6 Luna", webSearch: "native", temperature: false },
-  { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5", webSearch: false, temperature: false },
-  { id: "google/gemini-3-flash-preview", name: "Gemini 3 Flash", webSearch: false, temperature: true },
-  { id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", webSearch: false, temperature: true },
+  { id: "openai/gpt-6-luna", name: "GPT-6 Luna", webSearch: "native", temperature: false, imageInput: true },
+  { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5", webSearch: false, temperature: false, imageInput: true },
+  { id: "google/gemini-3-flash-preview", name: "Gemini 3 Flash", webSearch: false, temperature: true, imageInput: true },
+  { id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", webSearch: false, temperature: true, imageInput: false },
 ] as const;
 
 export const ALLOWED_MODEL_IDS = MODELS.map(m => m.id) as string[];
@@ -78,6 +83,14 @@ export const ALLOWED_MODEL_IDS = MODELS.map(m => m.id) as string[];
 /** Whether web search is enabled for this model id (see MODELS). Unlisted ids: no. */
 export function modelSupportsWebSearch(modelId: string): boolean {
   return MODELS.find((m) => m.id === modelId)?.webSearch === "native";
+}
+
+/**
+ * Whether the model takes image input (see MODELS). Unlisted ids (eval
+ * candidates): no, since an image sent to a text-only model fails the request.
+ */
+export function modelSupportsImageInput(modelId: string): boolean {
+  return MODELS.find((m) => m.id === modelId)?.imageInput ?? false;
 }
 
 /** Whether the model accepts a temperature (see MODELS). Unlisted ids (eval candidates): yes. */

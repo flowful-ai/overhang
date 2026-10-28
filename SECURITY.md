@@ -31,7 +31,7 @@ Overhang is self-hosted: whoever runs an install operates it.
 - **Worker auth.** `/render` and `/export-3mf` require a matching `X-Worker-Secret` header (`WORKER_SECRET`), which blocks requests from inside the Docker network that CORS cannot stop.
 - **Rate limiting.** Per IP: `/api/generate-cad` 10/min, `/api/render-cad` and `/api/export-3mf` 20/min. The client IP comes from proxy headers only when `TRUST_PROXY` or `TRUST_CF_CONNECTING_IP` is set, never from the client-controlled left end of `X-Forwarded-For`. IPv6 clients are keyed by /64. The store is in memory, per instance.
 - **Concurrency.** All callers share a global pool per endpoint (`MAX_CONCURRENT_GENERATIONS`, `MAX_CONCURRENT_RENDERS`); over the cap the route returns 503.
-- **Cost controls.** A hard `maxOutputTokens` per turn, a 5-step agent loop, and `EMERGENCY_DISABLE_GENERATION=1` as a kill switch.
+- **Cost controls.** A hard `maxOutputTokens` per step, an 8-step agent loop, a 240 s turn timeout, and `EMERGENCY_DISABLE_GENERATION=1` as a kill switch.
 - **Input validation.** AI SDK UI message validation, user and assistant roles only, 10,000-character prompts, inline images only (2 MB for the image being sent; unusable images in older turns are dropped with a placeholder), code length, model allowlist, a 200-message history cap, and a request body cap (10 MB on generate-cad, 1 MB on the render and export routes) counted as the body streams, so chunked uploads cannot skip it.
 - **HTTP headers.** CSP, HSTS, X-Frame-Options, nosniff, Referrer-Policy, Permissions-Policy (see `next.config.ts`).
 - **Sanitized errors.** Paths are stripped from error text before it reaches the user or the LLM.

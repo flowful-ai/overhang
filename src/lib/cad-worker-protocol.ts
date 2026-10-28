@@ -25,12 +25,55 @@ export const WorkerMetrics = z.object({
 });
 export type WorkerMetrics = z.infer<typeof WorkerMetrics>;
 
+// A printability finding. "blocking": the file won't print as intended (not a
+// closed solid, off the build plate, walls below what a nozzle can lay down);
+// "advisory": printable but worth a look. Classified by the worker
+// (inspect_mesh and geometry_report in cad-worker/main.py).
+export const RenderIssue = z.object({
+  severity: z.enum(["blocking", "advisory"]),
+  message: z.string(),
+});
+export type RenderIssue = z.infer<typeof RenderIssue>;
+
+// What the worker measured on the exact BRep, so the model can check the
+// result against the request (GeometryModel in cad-worker/main.py). A
+// measurement that did not complete (deadline, failure) is null.
+export const GeometryReport = z.object({
+  solid_count: z.number(),
+  z_min: z.number().nullable(),
+  bounds_min: z.array(z.number()).nullable(),
+  bounds_max: z.array(z.number()).nullable(),
+  valid: z.boolean().nullable(),
+  faces: z.record(z.string(), z.number()),
+  holes: z.array(
+    z.object({ diameter: z.number(), depth: z.number(), axis: z.string(), through: z.boolean(), count: z.number() }),
+  ),
+  /** Total holes; null when hole detection did not complete. */
+  hole_count: z.number().nullable(),
+  /** Thinnest wall covering a real share of the surface (2nd percentile of ray-cast samples). */
+  min_wall_mm: z.number().nullable(),
+  /** Steepest overhang (degrees from vertical, 90 = flat ceiling), where, and the total overhang area. */
+  overhang: z.object({ worst_deg: z.number(), at: z.array(z.number()), area_mm2: z.number() }).nullable(),
+  solids: z.array(z.object({ volume: z.number(), bbox: BoundingBox, z_min: z.number() })),
+});
+export type GeometryReport = z.infer<typeof GeometryReport>;
+
+// A shaded preview image of the render (cad-worker/views.py), for the model's
+// visual self-check. Only returned when the request asked for views.
+export const RenderView = z.object({ name: z.string(), png_base64: z.string() });
+export type RenderView = z.infer<typeof RenderView>;
+
 export const WorkerRenderResult = z
   .object({
     stl_base64: z.string(),
     metrics: WorkerMetrics,
     // Python emits null (not []) when there are no warnings; callers coalesce.
+    // The messages of `issues`, in the same order.
     warnings: z.array(z.string()).nullable(),
+    // nullish: absent from workers and eval fixtures that predate them.
+    issues: z.array(RenderIssue).nullish(),
+    geometry: GeometryReport.nullish(),
+    views: z.array(RenderView).nullish(),
     console_output: z.string().nullable(),
   })
   .strict();
@@ -47,13 +90,18 @@ export type WorkerThreeMFResult = z.infer<typeof WorkerThreeMFResult>;
 // Discriminated on `success`. The success branch carries everything the LLM
 // needs to reason about the next step (metrics, summary, warnings) plus what
 // the UI needs to render (stlBase64, code). The failure branch only carries
-// the sanitized error and the echoed code so the LLM can fix it.
+// the sanitized error and the echoed code so the LLM can fix it. Preview
+// images are not part of it: they would stream to the UI and be stored with
+// the chat, so the agent turn hands them to the model directly.
 export const CadqueryToolResult = z.discriminatedUnion("success", [
   z.object({
     success: z.literal(true),
     code: z.string(),
     stlBase64: z.string(),
     warnings: z.array(z.string()),
+    // Optional: results stored before they existed don't have them.
+    issues: z.array(RenderIssue).optional(),
+    geometry: GeometryReport.optional(),
     metrics: WorkerMetrics,
     summary: z.string(),
   }),

@@ -1,7 +1,13 @@
 import { callCadWorker, type WorkerCallOptions } from "./cad-worker";
 import { normalizePunctuation } from "./llm-code";
 import { toSanitizedMessage } from "./sanitize-error";
-import type { WorkerMetrics, WorkerRenderResult } from "./cad-worker-protocol";
+import type {
+  GeometryReport,
+  RenderIssue,
+  RenderView,
+  WorkerMetrics,
+  WorkerRenderResult,
+} from "./cad-worker-protocol";
 
 // The one render pipeline, shared by the agent tool (runCadquery in
 // cad-agent.ts, driven by the agent turn in agent-turn.ts) and the manual re-render route (/api/render-cad): normalize
@@ -19,6 +25,9 @@ export interface CadRenderSuccess {
   code: string; // normalized
   stlBase64: string;
   warnings: string[]; // Python emits null for "none"; coalesced to [] here.
+  issues: RenderIssue[]; // coalesced to [] like warnings
+  geometry?: GeometryReport; // absent from older workers and fixtures
+  views?: RenderView[]; // only when requested (opts.views)
   metrics: WorkerMetrics;
 }
 
@@ -69,20 +78,27 @@ export async function renderCad(
   requestId: string,
   // The eval replay path substitutes recorded worker responses; production uses
   // the live worker. `signal` cancels the worker call (and the 503 retries)
-  // when the caller gives up. `busyRetryDelaysMs` overrides the 503 backoff (tests).
-  opts?: { callWorker?: RenderWorker; signal?: AbortSignal; busyRetryDelaysMs?: readonly number[] },
+  // when the caller gives up. `views` asks the worker for preview images.
+  // `busyRetryDelaysMs` overrides the 503 backoff (tests).
+  opts?: { callWorker?: RenderWorker; signal?: AbortSignal; views?: boolean; busyRetryDelaysMs?: readonly number[] },
 ): Promise<CadRenderResult> {
   const callWorker = opts?.callWorker ?? callCadWorker;
   const delays = opts?.busyRetryDelaysMs ?? BUSY_RETRY_DELAYS_MS;
   const cleaned = normalizePunctuation(code);
   for (let attempt = 0; ; attempt++) {
     try {
-      const data = await callWorker(cleaned, requestId, { signal: opts?.signal });
+      const data = await callWorker(cleaned, requestId, {
+        signal: opts?.signal,
+        ...(opts?.views ? { views: true } : {}),
+      });
       return {
         success: true,
         code: cleaned,
         stlBase64: data.stl_base64,
         warnings: data.warnings ?? [],
+        issues: data.issues ?? [],
+        ...(data.geometry ? { geometry: data.geometry } : {}),
+        ...(data.views?.length ? { views: data.views } : {}),
         metrics: data.metrics,
       };
     } catch (e: unknown) {
