@@ -638,11 +638,15 @@ def wall_thickness_samples(shape: "cq.Shape", tm, samples: int = THIN_WALL_SAMPL
     intersector.Load(shape.wrapped, 1e-4)
     out = np.full(len(points), np.nan)
     for i, (p, n) in enumerate(zip(points, normals)):
-        if i % 100 == 0 and time.monotonic() > deadline:
+        if time.monotonic() > deadline:
             break
         o = p + n * offset
         intersector.Perform(gp_Lin(gp_Pnt(*o), gp_Dir(*(-n))), 0.0, 1e9)
-        hits = sorted((intersector.WParameter(k), k) for k in range(1, intersector.NbPnt() + 1))
+        hits = []
+        for w, k in sorted((intersector.WParameter(k), k) for k in range(1, intersector.NbPnt() + 1)):
+            # Coincident faces (separate solids that touch) are one surface.
+            if not hits or w - hits[-1][0] > 1e-3:
+                hits.append((w, k))
         if len(hits) < 2:
             continue
         k = hits[1][1]
@@ -682,6 +686,26 @@ def _thin_wall_issue(shape: "cq.Shape", tm, deadline: float = math.inf) -> tuple
     ), min_wall
 
 
+# Per-solid watertightness is checked for at most this many solids.
+MAX_WATERTIGHT_SOLIDS = 16
+
+
+def _solids_watertight(shape: "cq.Shape", deadline: float) -> Optional[bool]:
+    """For a multi-solid shape whose combined mesh is open: True when every
+    solid meshes closed on its own (the openness comes from parts touching),
+    False when one does not, None when not checked (one solid, too many, or
+    past the deadline)."""
+    solids = shape.Solids()
+    if not 1 < len(solids) <= MAX_WATERTIGHT_SOLIDS:
+        return None
+    for solid in solids:
+        if time.monotonic() > deadline:
+            return None
+        if not load_mesh(export_to_bytes(solid, "STL", ".stl")).is_watertight:
+            return False
+    return True
+
+
 def inspect_mesh(tm, shape: Optional["cq.Shape"] = None, deadline: float = math.inf) -> tuple[list[dict], dict]:
     """Printability checks on the export mesh. Returns (issues, report) where
     report carries the overhang summary and the estimated minimum wall
@@ -698,10 +722,21 @@ def inspect_mesh(tm, shape: Optional["cq.Shape"] = None, deadline: float = math.
             return issues, report
 
         if not tm.is_watertight:
-            issues.append(_issue(
-                BLOCKING,
-                "Non-watertight mesh: may cause slicing issues. Check for unclosed shells or boolean artifacts.",
-            ))
+            per_body = _solids_watertight(shape, deadline) if shape is not None else None
+            if per_body:
+                # Separate solids that touch share edges in the combined
+                # mesh, which reads as open although every part is closed.
+                issues.append(_issue(
+                    ADVISORY,
+                    "Non-watertight mesh where separate solids touch: each solid is closed, "
+                    "but a slicer may merge or misread the shared faces. Leave a gap between "
+                    "parts printed together, or fuse them with .union().",
+                ))
+            else:
+                issues.append(_issue(
+                    BLOCKING,
+                    "Non-watertight mesh: may cause slicing issues. Check for unclosed shells or boolean artifacts.",
+                ))
 
         overhang, report["overhang"] = _overhang_issue(tm)
         if overhang:
@@ -747,8 +782,12 @@ def validate_mesh(stl_bytes: bytes, shape: Optional["cq.Shape"] = None) -> list[
 
 # Cap on the per-solid list in the report (an array of 200 pins stays short).
 MAX_REPORTED_SOLIDS = 16
-# The BRep validity check is skipped on faces with more wires than this (see
-# geometry_report).
+# BRepCheck (shape.isValid()) cannot be interrupted, so it only starts on
+# shapes small enough to finish in well under the time left after the
+# analysis deadline (40% of EXEC_TIMEOUT): at most this many faces, and no
+# face with more wires than this (it compares every pair of wires on a face;
+# a plate with 400 holes took 5 s).
+VALIDITY_MAX_FACES = 300
 VALIDITY_MAX_WIRES_PER_FACE = 64
 
 
@@ -838,11 +877,18 @@ def _cylindrical_holes(solid: "cq.Solid", deadline: float = math.inf) -> list[di
             full = [r for r, s in spans.items() if s >= 2 * math.pi - 1e-3]
             if not full:
                 continue
+            tip = 1.05 * min(full) + 0.1
             holes.append({
                 "diameter": round(2 * min(full), 2),
                 "depth": round(g["t1"] - g["t0"], 2),
                 "axis": _axis_name(d),
-                "through": outside(foot + d * (g["t0"] - 0.1)) and outside(foot + d * (g["t1"] + 0.1)),
+                "through": all(
+                    # Just past the bore, and past where a drill-point cone or
+                    # ball end (at most one radius long) would stop: a blind
+                    # hole's tip is empty but the material beyond it is not.
+                    outside(foot + d * t)
+                    for t in (g["t0"] - 0.1, g["t0"] - tip, g["t1"] + 0.1, g["t1"] + tip)
+                ),
             })
     return holes
 
@@ -908,8 +954,9 @@ def geometry_report(shape: "cq.Shape", is_assembly: bool, deadline: float = math
     if len(solids) > 1 and not is_assembly:
         issues.append(_issue(
             ADVISORY,
-            f"The result has {len(solids)} disjoint solids. If it is meant to be one part, its bodies do "
-            "not touch: make them overlap before .union(). Use a cq.Assembly for intentionally separate parts.",
+            f"The result has {len(solids)} separate solids that are not fused. If it is meant to be one "
+            "part, combine the bodies with .union() (they must overlap, not just touch); .add() keeps them "
+            "separate. Use a cq.Assembly for intentionally separate parts.",
         ))
 
     faces: dict = {}
@@ -931,10 +978,11 @@ def geometry_report(shape: "cq.Shape", is_assembly: bool, deadline: float = math
     except Exception as e:
         logger.warning("Hole detection failed: %s", e)
 
-    # BRepCheck compares every pair of wires on a face, so a plate with
-    # hundreds of holes takes seconds: skip it there (valid stays None).
+    # Skipped (valid stays None) on large shapes and past the deadline: see
+    # VALIDITY_MAX_FACES.
     valid = None
-    if max_wires <= VALIDITY_MAX_WIRES_PER_FACE and time.monotonic() < deadline:
+    small = sum(faces.values()) <= VALIDITY_MAX_FACES and max_wires <= VALIDITY_MAX_WIRES_PER_FACE
+    if small and time.monotonic() < deadline:
         try:
             valid = bool(shape.isValid())
         except Exception:

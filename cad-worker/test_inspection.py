@@ -230,7 +230,7 @@ def test_report_flags_disjoint_and_floating_solids():
     assert report["solid_count"] == 2
     assert len(report["solids"]) == 2
     messages = " ".join(i["message"] for i in issues)
-    assert "2 disjoint solids" in messages
+    assert "2 separate solids that are not fused" in messages
     assert "1 of 2 separate solids do not reach the bed" in messages
 
 
@@ -289,3 +289,102 @@ def test_render_endpoint_views_only_on_request():
     assert [v["name"] for v in with_views["views"]] == ["iso", "top", "front"]
     # Separate cache entries: the plain render must not be served views-less.
     assert client.post("/render", json={"code": code}).json()["views"] is None
+
+
+# --- Review follow-ups: deadlines, drilled tips, touching parts ---
+
+def test_slow_exec_skips_optional_analyses(monkeypatch):
+    # A script whose exec + export eats the analysis share of EXEC_TIMEOUT
+    # must still come back fast, without the optional analyses, instead of
+    # being pushed past the hard kill.
+    import time
+
+    import main
+
+    real_exec = main.exec_user_code
+
+    def slow_exec(code):
+        time.sleep(0.7)
+        return real_exec(code)
+
+    monkeypatch.setattr(main, "EXEC_TIMEOUT", 1)  # analysis deadline at 0.6 s
+    monkeypatch.setattr(main, "exec_user_code", slow_exec)
+    calls = []
+    monkeypatch.setattr(cq.Shape, "isValid", lambda self: calls.append(1) or True)
+    started = time.monotonic()
+    out = main._render_pipeline(
+        'import cadquery as cq\nresult = cq.Workplane("XY").box(20, 20, 5).faces(">Z").workplane().hole(4)',
+        views=True,
+    )
+    elapsed = time.monotonic() - started
+    g = out["geometry"]
+    assert g["solid_count"] == 1  # cheap parts still reported
+    assert g["hole_count"] is None and g["min_wall_mm"] is None and g["valid"] is None
+    assert out["views"] is None
+    assert calls == []
+    assert elapsed < 1.0
+
+
+def test_thickness_rays_stop_at_the_deadline():
+    import time
+    shape, tm = _mesh(_box_with_one_wall(1.0))
+    t, _ = wall_thickness_samples(shape, tm, samples=500, deadline=time.monotonic() - 1)
+    assert np.isnan(t).all()
+
+
+def test_validity_check_skipped_on_large_shapes(monkeypatch):
+    import main
+    monkeypatch.setattr(main, "VALIDITY_MAX_FACES", 5)
+    calls = []
+    monkeypatch.setattr(cq.Shape, "isValid", lambda self: calls.append(1) or True)
+    report, _ = _report(cq.Workplane("XY").box(10, 10, 10).faces(">Z").workplane().hole(3))
+    assert report["valid"] is None and calls == []
+
+
+@pytest.mark.parametrize("tip", ["cone", "ball"])
+def test_blind_hole_with_drilled_tip_is_not_through(tip):
+    # A 5mm bore 6mm deep ending in a 118 degree drill point or a ball end,
+    # cut by revolving the profile: the bore ends in an empty tip.
+    r, depth = 2.5, 6.0
+    block = cq.Workplane("XY").box(20, 20, 15, centered=(True, True, False))
+    if tip == "cone":
+        tip_len = r / np.tan(np.radians(59))
+        profile = cq.Workplane("XZ").polyline(
+            [(0, 15), (r, 15), (r, 15 - depth), (0, 15 - depth - tip_len)]).close()
+    else:
+        profile = (cq.Workplane("XZ").moveTo(0, 15).lineTo(r, 15).lineTo(r, 15 - depth)
+                   .threePointArc((r * np.sin(np.radians(45)), 15 - depth - r * np.cos(np.radians(45))),
+                                  (0, 15 - depth - r)).close())
+    drilled = block.cut(profile.revolve(360, (0, 0, 0), (0, 1, 0)))
+    report, _ = _report(drilled)
+    assert report["hole_count"] == 1
+    hole = report["holes"][0]
+    assert hole["diameter"] == pytest.approx(5.0) and hole["through"] is False
+
+
+def test_touching_assembly_parts_are_not_blocking():
+    # Two closed parts sharing a face: the combined mesh is open where they
+    # touch, but each solid is closed.
+    asm = (
+        cq.Assembly()
+        .add(cq.Workplane("XY").box(10, 10, 10, centered=(True, True, False)))
+        .add(cq.Workplane("XY").box(10, 10, 10, centered=(True, True, False)), loc=cq.Location((10, 0, 0)))
+    )
+    shape, tm = _mesh(asm)
+    issues, _ = inspect_mesh(tm, shape)
+    watertight = [i for i in issues if "watertight" in i["message"].lower()]
+    assert watertight and all(i["severity"] == ADVISORY for i in watertight)
+    # Rays from the shared face must not read the touching faces as a wall.
+    assert not [i for i in issues if i["severity"] == BLOCKING]
+
+
+def test_open_single_body_is_still_blocking():
+    # An open mesh with no BRep to check per body stays blocking.
+    import io as _io
+    import trimesh as _trimesh
+    box = _trimesh.creation.box((10, 10, 10))
+    box.update_faces(np.arange(len(box.faces)) != 0)
+    buf = _io.BytesIO()
+    box.export(buf, file_type="stl")
+    issues, _ = inspect_mesh(load_mesh(buf.getvalue()))
+    assert any(i["severity"] == BLOCKING and "watertight" in i["message"].lower() for i in issues)
