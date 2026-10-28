@@ -68,9 +68,10 @@ export function systemPromptSha256(): string {
   return createHash("sha256").update(SYSTEM_PROMPT).digest("hex");
 }
 
-/** Drop the STL payload: fixtures stay small and scoring never reads it. */
+/** Drop the STL and preview images: fixtures stay small and scoring never reads them. */
 export function stripStl(response: WorkerRenderResult): WorkerRenderResult {
-  return { ...response, stl_base64: "" };
+  const { views: _views, ...rest } = response;
+  return { ...rest, stl_base64: "" };
 }
 
 export function modelSlug(model: string): string {
