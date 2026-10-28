@@ -24,7 +24,7 @@ docker compose run --rm -e WORKER_SECRET= cad-worker \
   sh -c "pip install -q --target /tmp/dev -r requirements-dev.txt && PYTHONPATH=/tmp/dev python -m pytest"
 ```
 
-Tests live in `src/__tests__/` (vitest) and `cad-worker/test_main.py` (pytest). `evals/replay.test.ts` replays recorded fixtures (`evals/fixtures/`) through the real agent core with a mock model, for free; it checks the harness and scoring, not model behavior.
+Tests live in `src/__tests__/` (vitest) and `cad-worker/test_*.py` (pytest). `cad-worker/test_prompt_examples.py` renders every worked example in the agent's system prompt (`src/lib/cad-agent.ts`) and checks its geometry; the container above only has `cad-worker/`, so those tests skip there and run in CI. `evals/replay.test.ts` replays recorded fixtures (`evals/fixtures/`) through the real agent core with a mock model, for free; it checks the harness and scoring, not model behavior.
 
 CAD worker lint, on the host with [uv](https://docs.astral.sh/uv/) (or `pipx run --spec ruff==0.15.20 ruff check cad-worker`). Use the ruff version pinned in `cad-worker/requirements-dev.txt`:
 
