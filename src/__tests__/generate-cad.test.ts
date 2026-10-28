@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
+import { APICallError } from "ai";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import type { LanguageModelV3StreamPart } from "@ai-sdk/provider";
 import { createGenerateCadPost } from "@/app/api/generate-cad/handler";
@@ -333,6 +334,28 @@ describe("generate-cad route — agentic tool loop", () => {
     } finally {
       vi.useRealTimers();
       vi.unstubAllEnvs();
+    }
+  });
+
+  it("tags a streamed provider error with its HTTP status", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      mockModel = new MockLanguageModelV3({
+        doStream: async () => {
+          throw new APICallError({
+            message: "User not found.",
+            url: "https://openrouter.ai/api/v1/chat/completions",
+            requestBodyValues: {},
+            statusCode: 401,
+            isRetryable: false,
+          });
+        },
+      });
+      const res = await POST(makeRequest());
+      const body = await readSseStream(res);
+      expect(body).toContain('"errorText":"AI_APICallError (HTTP 401): User not found."');
+    } finally {
+      errorSpy.mockRestore();
     }
   });
 

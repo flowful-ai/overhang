@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createUIMessageStreamResponse, type ModelMessage, type UIMessageChunk } from "ai";
+import { APICallError, createUIMessageStreamResponse, type ModelMessage, type UIMessageChunk } from "ai";
 import type { LanguageModelV3 } from "@ai-sdk/provider";
 import { z } from "zod";
 import { APP_CONSTANTS } from "@/lib/utils";
@@ -320,8 +320,12 @@ export function createGenerateCadPost(deps: GenerateCadDeps) {
             .toUIMessageStream({
               // Already logged by the agent turn; this only shapes the client text.
               onError: (e) => {
-                const prefix = e instanceof Error && e.name && e.name !== "Error" ? `${e.name}: ` : "";
-                return prefix + toSanitizedMessage(e);
+                const name = e instanceof Error && e.name && e.name !== "Error" ? e.name : "";
+                // The provider's HTTP status (401 bad key, 402 no credits) is
+                // the stable signal; its message text varies. The client maps
+                // it (chat-error.ts). An APICallError always has a name.
+                const status = APICallError.isInstance(e) && e.statusCode ? ` (HTTP ${e.statusCode})` : "";
+                return (name ? `${name}${status}: ` : "") + toSanitizedMessage(e);
               },
             })
             .pipeThrough(abortAsError());

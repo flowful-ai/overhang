@@ -25,6 +25,33 @@ describe("extractErrorText", () => {
 describe("describeChatError", () => {
   const body = (error: string) => new Error(JSON.stringify({ error }));
 
+  it("maps a missing server key to the setup fix, not retryable", () => {
+    const info = describeChatError(body("OPENROUTER_API_KEY is not configured"));
+    expect(info.retryable).toBe(false);
+    expect(info.message).toMatch(/Set OPENROUTER_API_KEY in \.env, then restart/);
+  });
+
+  it("maps an OpenRouter 401 to an invalid key, not retryable", () => {
+    const info = describeChatError(new Error("AI_APICallError (HTTP 401): User not found."));
+    expect(info).toEqual({
+      message: "OpenRouter rejected the API key. Check OPENROUTER_API_KEY in .env, then restart the server.",
+      retryable: false,
+    });
+  });
+
+  it("maps an OpenRouter 402 to out of credits, by status or by text", () => {
+    const expected = {
+      message: "Your OpenRouter account is out of credits. Add credits at openrouter.ai/settings/credits, then retry.",
+      retryable: true,
+    };
+    expect(describeChatError(new Error("AI_APICallError (HTTP 402): This request requires more credits."))).toEqual(expected);
+    expect(describeChatError(new Error("Insufficient credits. Add more using https://openrouter.ai/settings/credits"))).toEqual(expected);
+  });
+
+  it("does not read a status number elsewhere in the text as a provider status", () => {
+    expect(describeChatError(new Error("Box needs 401 mm of travel")).message).toBe("Box needs 401 mm of travel");
+  });
+
   it("maps the server's turn timeout", () => {
     const info = describeChatError(new Error("The operation was aborted due to timeout"));
     expect(info).toEqual({
