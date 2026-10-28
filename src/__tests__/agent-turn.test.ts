@@ -4,6 +4,7 @@ import type { LanguageModelV3CallOptions, LanguageModelV3StreamPart } from "@ai-
 import { MAX_AGENT_STEPS } from "@/components/chat/constants";
 import {
   AGENT_TURN_TIMEOUT_MS,
+  FINAL_REPLY_RESERVE_MS,
   EMPTY_REPLY_TEXT,
   isEmptyReplyFallback,
   openRouterModel,
@@ -98,6 +99,43 @@ async function startedTurn(options: Parameters<typeof runAgentTurn>[0]) {
 }
 
 describe("runAgentTurn", () => {
+  it("disables tools early when slow renders leave too little time for another step", async () => {
+    // Each render takes ~70 s of wall clock (simulated): after three, less
+    // than FINAL_REPLY_RESERVE_MS of the turn is left, so the next step gets
+    // no tools and the model replies instead of hitting the timeout.
+    let clock = 1_000_000;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    try {
+      const renderMs = 70_000;
+      const render = vi.fn<AgentWorker["render"]>(async () => {
+        clock += renderMs;
+        return okRender();
+      });
+      let i = 0;
+      const doStream = vi.fn<DoStream>(async (options) => ({
+        stream: simulateReadableStream({
+          chunks: options.toolChoice?.type === "none" ? textStep() : toolStep(`c${i++}`),
+          ...NO_DELAY,
+        }),
+      }));
+      const stream = await startedTurn({
+        model: new MockLanguageModelV3({ doStream }),
+        prompt: "make a cube",
+        worker: fakeWorker({ render }),
+        requestId: "slow-renders",
+      });
+      await stream.consumeStream();
+
+      const choices = doStream.mock.calls.map(([options]) => options.toolChoice?.type);
+      const toolSteps = Math.floor((AGENT_TURN_TIMEOUT_MS - FINAL_REPLY_RESERVE_MS) / renderMs) + 1;
+      expect(toolSteps).toBeLessThan(MAX_AGENT_STEPS - 1);
+      expect(choices).toEqual([...Array(toolSteps).fill("auto"), "none"]);
+      expect(await stream.text).toBe("Done.");
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it("caps the turn at MAX_AGENT_STEPS and disables tools on the final step", async () => {
     let i = 0;
     const doStream = vi.fn<DoStream>(async () => ({ stream: simulateReadableStream({ chunks: toolStep(`c${i++}`) }) }));

@@ -86,6 +86,14 @@ const MAX_OUTPUT_TOKENS = 16_000;
  */
 export const AGENT_TURN_TIMEOUT_MS = 240_000;
 
+/**
+ * Tools go off early once less than this is left of AGENT_TURN_TIMEOUT_MS:
+ * another render (up to the worker's 30 s limit) plus the model's reply
+ * would risk the timeout, which ends the turn with an error instead of a
+ * reply. One model step plus one render, with margin.
+ */
+export const FINAL_REPLY_RESERVE_MS = 45_000;
+
 /** Text that introduces the preview images injected after a successful render. */
 export function renderViewsIntro(views: RenderView[]): string {
   const list = views.map((v, i) => `${i + 1}. ${VIEW_DESCRIPTIONS[v.name] ?? v.name}`).join("; ");
@@ -136,7 +144,9 @@ type StepOverrides = { toolChoice?: "none"; providerOptions?: ProviderOptions; m
  * Per-step overrides (stepNumber is 0-based).
  * - Last allowed step: tools off. With stopWhen: stepCountIs(MAX_AGENT_STEPS)
  *   the loop can otherwise end on a tool call, leaving the user with a render
- *   (or a failure) and no explanation.
+ *   (or a failure) and no explanation. Same once the turn is within
+ *   FINAL_REPLY_RESERVE_MS of its timeout (slow renders and model calls): the
+ *   model must reply with what it has. Without tool calls the loop ends there.
  * - First step: web search, when the turn has it. Specs are looked up before
  *   the first script; later steps fix renders and don't pay for a new search.
  *   Merged over the per-model options by the SDK.
@@ -147,6 +157,7 @@ type StepOverrides = { toolChoice?: "none"; providerOptions?: ProviderOptions; m
 function agentStepPreparer(
   webSearchOptions: ProviderOptions | undefined,
   renderViews: ReadonlyMap<string, RenderView[]> | null,
+  turnStartedAt: number,
 ) {
   return ({
     stepNumber,
@@ -158,7 +169,8 @@ function agentStepPreparer(
     messages: ModelMessage[];
   }): StepOverrides => {
     const overrides: StepOverrides = {};
-    if (stepNumber >= MAX_AGENT_STEPS - 1) overrides.toolChoice = "none";
+    const outOfTime = Date.now() - turnStartedAt > AGENT_TURN_TIMEOUT_MS - FINAL_REPLY_RESERVE_MS;
+    if (stepNumber >= MAX_AGENT_STEPS - 1 || outOfTime) overrides.toolChoice = "none";
     else if (stepNumber === 0 && webSearchOptions) overrides.providerOptions = webSearchOptions;
     const viewsMessage = renderViews ? renderViewsMessage(steps, renderViews) : null;
     if (viewsMessage) overrides.messages = [...messages, viewsMessage];
@@ -321,7 +333,7 @@ function startStream(o: {
     stopWhen: stepCountIs(MAX_AGENT_STEPS),
     // Tools off on the last allowed step, so the turn ends with text; web
     // search (when on) on the first step only.
-    prepareStep: agentStepPreparer(webSearchOptions, o.renderViews),
+    prepareStep: agentStepPreparer(webSearchOptions, o.renderViews, Date.now()),
     maxOutputTokens: MAX_OUTPUT_TOKENS,
     abortSignal: o.abortSignal,
     // The turn ends when the step loop's stream terminates:

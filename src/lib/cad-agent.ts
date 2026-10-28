@@ -513,10 +513,17 @@ export const SAME_CODE_AS_INPUT = "(identical to the code argument of this call)
 /** A runCadquery result as the model sees it. Defensive: history outputs come from the client. */
 function resultForModel(input: unknown, output: CadqueryToolResult): JSONValue {
   if (typeof output !== "object" || output === null) return (output ?? null) as JSONValue;
-  // `issues` is dropped too: the summary already lists them, grouped by severity.
-  const { stlBase64: _omit, issues: _issues, ...rest } = output as CadqueryToolResult & {
+  // `issues` and `geometry` are dropped too: the summary already states them
+  // as text, and every prior result is re-sent on each later step and turn.
+  const {
+    stlBase64: _omit,
+    issues: _issues,
+    geometry: _geometry,
+    ...rest
+  } = output as CadqueryToolResult & {
     stlBase64?: string;
     issues?: unknown;
+    geometry?: unknown;
   };
   const inputCode = (input as { code?: unknown } | undefined)?.code;
   if (typeof inputCode === "string" && rest.code === inputCode) return { ...rest, code: SAME_CODE_AS_INPUT };

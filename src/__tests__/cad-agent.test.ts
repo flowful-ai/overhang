@@ -129,14 +129,15 @@ describe("runCadquery tool", () => {
     expect(worker.mock.calls[0][2]).not.toHaveProperty("views");
   });
 
-  it("drops the STL and the duplicated issue list from what the model sees", async () => {
+  it("drops the STL and the issue list and geometry report the summary already states from what the model sees", async () => {
     const tool = createRunCadqueryTool({ requestId: "r", worker: async () => response });
     const out = await tool.execute!({ code: "code" }, { toolCallId: "c", messages: [] });
     const forModel = await tool.toModelOutput!({ toolCallId: "c", input: { code: "code" }, output: out as never });
     const value = (forModel as { value: Record<string, unknown> }).value;
     expect(value).not.toHaveProperty("stlBase64");
     expect(value).not.toHaveProperty("issues");
-    expect(value).toHaveProperty("geometry");
+    expect(value).not.toHaveProperty("geometry");
+    expect(String(value.summary)).toContain("4 round holes: 4x d3.5 through along Z");
     expect(String(value.summary)).toContain("Advisory: Overhang warning");
   });
 });
