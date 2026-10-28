@@ -47,7 +47,9 @@ export function useChatPersistence({
       const saved = localStorage.getItem(STORAGE_KEY);
       if (!saved) return;
       const state = JSON.parse(saved);
-      // An id dropped from MODELS since the save keeps the remembered choice.
+      // Intentional: a restored thread resumes on the model it was saved with,
+      // over the remembered choice. An id dropped from MODELS keeps the
+      // remembered choice.
       if (typeof state.model === "string" && ALLOWED_MODEL_IDS.includes(state.model)) setModel(state.model);
       // importExternalState takes the repository shape; a bare message array
       // (what this hook used to write) is linked into one.

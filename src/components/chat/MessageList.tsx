@@ -11,9 +11,9 @@ import {
 
 import CodeEditor from "./lazy-code-editor";
 import type { CadqueryToolResult } from "@/lib/cad-worker-protocol";
-import { MAX_AGENT_STEPS, TOOL_NAME } from "./constants";
+import { TOOL_NAME } from "./constants";
 import RerenderButton from "./RerenderButton";
-import { deriveAgentProgress, deriveAgentStep, formatElapsed } from "./agent-progress";
+import { deriveAgentProgress, turnStatsLabel } from "./agent-progress";
 import { extractStreamingCode } from "./streaming-code";
 import { useDesignSession } from "./design-session";
 import { describeChatError, findRetryTarget } from "./chat-error";
@@ -242,7 +242,7 @@ const WarningsCard = memo(function WarningsCard({ warnings }: { warnings: string
 // Step count and elapsed time beside the running label. Mounted only while a
 // turn runs, so the clock starts at zero for each turn. Kept out of the
 // aria-live region: a per-second tick would be announced every second.
-function TurnStats({ parts }: { parts: Parameters<typeof deriveAgentStep>[0] }) {
+function TurnStats({ parts }: { parts: Parameters<typeof turnStatsLabel>[0] }) {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   useEffect(() => {
     const start = Date.now();
@@ -251,7 +251,7 @@ function TurnStats({ parts }: { parts: Parameters<typeof deriveAgentStep>[0] }) 
   }, []);
   return (
     <span className="text-xs text-gray-400 dark:text-gray-500 tabular-nums">
-      Step {deriveAgentStep(parts)} of {MAX_AGENT_STEPS} · {formatElapsed(elapsedSeconds)}
+      {turnStatsLabel(parts, elapsedSeconds)}
     </span>
   );
 }

@@ -20,11 +20,13 @@ import { useDesignSession } from "./design-session";
 // open state; dismissal (outside click and Escape) is handled locally by
 // usePopoverDismiss.
 export default function ViewerPane({
-  mobileTab, isDesktop, isRunning, setPendingImage,
+  mobileTab, isDesktop, isRunning, turnRendering, setPendingImage,
 }: {
   mobileTab: "chat" | "model";
   isDesktop: boolean;
   isRunning: boolean;
+  /** The running turn has a render in flight (hasPendingRender). */
+  turnRendering: boolean;
   setPendingImage: (img: string | null) => void;
 }) {
   const {
@@ -106,7 +108,7 @@ export default function ViewerPane({
       const blob = base64ToBlob(data.threemfBase64, "model/3mf");
       triggerBlobDownload(blob, "model.3mf");
     } catch {
-      toast("3MF export failed. Please try again.");
+      toast("3MF export failed. Please try again.", "error", { persistent: true });
     }
   };
 
@@ -186,11 +188,12 @@ export default function ViewerPane({
           )}
         </ErrorBoundary>
 
-        {/* The mesh on screen is about to be replaced: dim it and say so.
-            pointer-events-none keeps orbit and zoom working underneath. The
-            chat's progress label already announces a turn, so only a local
-            re-render is announced here. */}
-        {displayedStl && (isRendering || isRunning) && (
+        {/* The mesh on screen is about to be replaced (a local re-render, or
+            a render call in the running turn; a text-only reply leaves it
+            alone): dim it and say so. pointer-events-none keeps orbit and
+            zoom working underneath. The chat's progress label already
+            announces a turn, so only a local re-render is announced here. */}
+        {displayedStl && (isRendering || turnRendering) && (
           <div className="absolute inset-0 pointer-events-none bg-white/30 dark:bg-gray-900/30 flex items-end justify-center pb-6 animate-in fade-in">
             <div
               role={isRendering ? "status" : undefined}
@@ -198,7 +201,7 @@ export default function ViewerPane({
               className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/90 dark:bg-gray-900/90 border border-gray-200 dark:border-gray-800 shadow-sm text-xs font-medium text-gray-600 dark:text-gray-300"
             >
               <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden />
-              {isRendering ? "Rendering..." : "Updating design..."}
+              Rendering...
             </div>
           </div>
         )}

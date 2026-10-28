@@ -31,7 +31,8 @@ import {
 } from "./message-queue";
 import { createQueueDriver, type QueueThread } from "./queue-driver";
 import { loadWebSearchPreference, saveWebSearchPreference } from "./web-search-preference";
-import { saveModelPreference } from "./model-preference";
+import { rememberModelChoice } from "./model-preference";
+import { hasPendingRender } from "./agent-progress";
 
 // The thread as the message queue uses it. A queued item goes through the
 // same append as a typed message, so the transport applies the basis, image
@@ -158,26 +159,23 @@ function ChatInterfaceInner({
   // The design session owns the current design + working copy + preview render;
   // the panes read it from context. Inner only needs displayedStl (mobile badge)
   // and reset (New Chat).
-  const session = useProvideDesignSession({ messages, isRunning, workingCodeRef, onError: toast });
+  // Errors the user has to act on (a failed render, storage full, a prompt
+  // over the limit) stay until dismissed; other toasts auto-dismiss.
+  const toastPersistent = useCallback((m: string) => toast(m, "error", { persistent: true }), [toast]);
+  const session = useProvideDesignSession({ messages, isRunning, workingCodeRef, onError: toastPersistent });
   const { displayedStl } = session;
   // Persisted model ids can predate a dropdown change; fall back to the
   // default instead of displaying a raw unknown id in the header.
   const setModelSafe = useCallback((m: string) => setModel(allowedModelId(m)), [setModel]);
   // A pick from the header is remembered across New Chat and reloads.
-  const chooseModel = useCallback(
-    (m: string) => {
-      setModelSafe(m);
-      saveModelPreference(m);
-    },
-    [setModelSafe],
-  );
+  const chooseModel = useCallback((m: string) => rememberModelChoice(m, setModel), [setModel]);
   const { clearPersisted } = useChatPersistence({
     runtime,
     messages,
     isRunning,
     model,
     setModel: setModelSafe,
-    onPersistError: toast,
+    onPersistError: toastPersistent,
   });
 
   // Resize handler for the divider. RAF-coalesces state updates to one per frame.
@@ -305,7 +303,12 @@ function ChatInterfaceInner({
     queueDriver.observe(toQueueThread(threadRuntime, appendUserMessage), { isRunning, messages });
   }, [queueDriver, threadRuntime, appendUserMessage, isRunning, messages]);
 
-  const tooLongMessage = `Prompt exceeds maximum length of ${APP_CONSTANTS.MAX_PROMPT_LENGTH.toLocaleString()} characters.`;
+  // The running turn is producing a new mesh (not a text-only reply): the
+  // viewer dims the current one.
+  const lastMessage = messages[messages.length - 1];
+  const turnRendering = isRunning && lastMessage?.role === "assistant" && hasPendingRender(lastMessage.content);
+
+  const tooLongMessage =`Prompt exceeds maximum length of ${APP_CONSTANTS.MAX_PROMPT_LENGTH.toLocaleString()} characters.`;
 
   // Local re-renders (isRendering) don't lock the composer, only an active
   // AI turn does (UX audit #6), and during a turn sending queues instead.
@@ -319,14 +322,14 @@ function ChatInterfaceInner({
         image: pendingImage,
         maxLength: APP_CONSTANTS.MAX_PROMPT_LENGTH,
       });
-      if (rejected === "too-long") toast(tooLongMessage);
+      if (rejected === "too-long") toastPersistent(tooLongMessage);
       if (rejected === "full") {
         toast(`The queue is full (${MAX_QUEUED_MESSAGES} messages). Remove one or wait for the reply.`);
       }
       if (rejected) return;
     } else {
       const invalid = validateOutgoing(prompt, pendingImage, APP_CONSTANTS.MAX_PROMPT_LENGTH);
-      if (invalid === "too-long") toast(tooLongMessage);
+      if (invalid === "too-long") toastPersistent(tooLongMessage);
       if (invalid) return;
       appendUserMessage(outgoingText(prompt, pendingImage), pendingImage);
     }
@@ -506,6 +509,7 @@ function ChatInterfaceInner({
           mobileTab={mobileTab}
           isDesktop={isDesktop}
           isRunning={isRunning}
+          turnRendering={turnRendering}
           setPendingImage={setPendingImage}
         />
       </main>

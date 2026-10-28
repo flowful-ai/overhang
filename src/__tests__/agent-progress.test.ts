@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveAgentProgress, deriveAgentStep, formatElapsed } from "@/components/chat/agent-progress";
+import { deriveAgentProgress, deriveAgentStep, formatElapsed, hasPendingRender, turnStatsLabel } from "@/components/chat/agent-progress";
 import { MAX_AGENT_STEPS, TOOL_NAME } from "@/components/chat/constants";
 
 const call = (result?: unknown) => ({ type: "tool-call", toolName: TOOL_NAME, result });
@@ -35,7 +35,6 @@ describe("deriveAgentProgress", () => {
       "Finishing up...",
     );
   });
-
 });
 
 describe("deriveAgentStep", () => {
@@ -43,17 +42,46 @@ describe("deriveAgentStep", () => {
     expect(deriveAgentStep([])).toBe(1);
     expect(deriveAgentStep([text])).toBe(1);
     expect(deriveAgentStep([call()])).toBe(1);
-    expect(deriveAgentStep([call({ success: false })])).toBe(1);
   });
 
-  it("counts render calls only", () => {
+  it("moves to the next step once a render settled", () => {
+    expect(deriveAgentStep([call({ success: false })])).toBe(2);
+    expect(deriveAgentStep([call({ success: true })])).toBe(2);
     expect(deriveAgentStep([call({ success: false }), text, call()])).toBe(2);
-    expect(deriveAgentStep([call({ success: false }), { type: "tool-call", toolName: "other" }])).toBe(1);
+    expect(deriveAgentStep([call({ success: false }), call({ success: false })])).toBe(3);
+  });
+
+  it("ignores other tools", () => {
+    expect(deriveAgentStep([call(), { type: "tool-call", toolName: "other", result: {} }])).toBe(1);
+  });
+
+  it("reaches the final, tools-off step after the last allowed render", () => {
+    const renders = Array.from({ length: MAX_AGENT_STEPS - 1 }, () => call({ success: false }));
+    expect(deriveAgentStep(renders)).toBe(MAX_AGENT_STEPS);
+    expect(deriveAgentStep([...renders, text])).toBe(MAX_AGENT_STEPS);
   });
 
   it("caps the step at the step budget", () => {
     const parts = Array.from({ length: MAX_AGENT_STEPS + 1 }, () => call({ success: false }));
     expect(deriveAgentStep(parts)).toBe(MAX_AGENT_STEPS);
+  });
+});
+
+describe("hasPendingRender", () => {
+  it("is true only while the newest render call has no result", () => {
+    expect(hasPendingRender([])).toBe(false);
+    expect(hasPendingRender([text])).toBe(false);
+    expect(hasPendingRender([call()])).toBe(true);
+    expect(hasPendingRender([call({ success: false }), call()])).toBe(true);
+    expect(hasPendingRender([call({ success: true }), text])).toBe(false);
+    expect(hasPendingRender([{ type: "tool-call", toolName: "other" }])).toBe(false);
+  });
+});
+
+describe("turnStatsLabel", () => {
+  it("shows the step, the budget and the elapsed time", () => {
+    expect(turnStatsLabel([], 0)).toBe(`Step 1 of ${MAX_AGENT_STEPS} · 0s`);
+    expect(turnStatsLabel([call({ success: false }), call()], 75)).toBe(`Step 2 of ${MAX_AGENT_STEPS} · 1m 15s`);
   });
 });
 

@@ -35,10 +35,28 @@ export function deriveAgentProgress(parts: ReadonlyArray<ProgressPart>): string 
   return "Finishing up...";
 }
 
-// The render step the turn is on, 1-based: the first render is step 1 even
-// before its tool call streams in. Capped at the server's step budget.
+// The agent step (one model call) the turn is on, 1-based. Each step ends in at
+// most one render: while the newest render is pending the turn is still on its
+// step; once it settled, the next step is underway (a fix, or the summary,
+// which on the last step runs with tools off). Capped at the server's budget.
 export function deriveAgentStep(parts: ReadonlyArray<ProgressPart>): number {
-  return Math.min(Math.max(renderCalls(parts).length, 1), MAX_STEPS);
+  const calls = renderCalls(parts);
+  const last = calls[calls.length - 1];
+  const step = last === undefined ? 1 : calls.length + (last.result === undefined ? 0 : 1);
+  return Math.min(step, MAX_STEPS);
+}
+
+// True while the turn's newest render call has no result: its code is
+// streaming in or the worker is rendering, so the mesh on screen is about to
+// change. False for a text-only turn and once the render settled.
+export function hasPendingRender(parts: ReadonlyArray<ProgressPart>): boolean {
+  const calls = renderCalls(parts);
+  return calls.length > 0 && calls[calls.length - 1].result === undefined;
+}
+
+// The text beside the running label: "Step 2 of 5 · 12s".
+export function turnStatsLabel(parts: ReadonlyArray<ProgressPart>, elapsedSeconds: number): string {
+  return `Step ${deriveAgentStep(parts)} of ${MAX_STEPS} · ${formatElapsed(elapsedSeconds)}`;
 }
 
 // "8s", or "1m 05s" from a minute on.

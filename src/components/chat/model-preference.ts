@@ -18,6 +18,17 @@ export function loadModelPreference(getStorage: GetStorage = browserStorage): st
   }
 }
 
+/** A pick from the header: applied (validated) and remembered. */
+export function rememberModelChoice(
+  modelId: string,
+  apply: (modelId: string) => void,
+  getStorage: GetStorage = browserStorage,
+): void {
+  const id = allowedModelId(modelId);
+  apply(id);
+  saveModelPreference(id, getStorage);
+}
+
 export function saveModelPreference(modelId: string, getStorage: GetStorage = browserStorage): void {
   try {
     getStorage().setItem(MODEL_STORAGE_KEY, allowedModelId(modelId));

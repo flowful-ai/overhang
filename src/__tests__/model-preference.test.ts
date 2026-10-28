@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { MODEL_STORAGE_KEY, loadModelPreference, saveModelPreference } from "@/components/chat/model-preference";
+import { MODEL_STORAGE_KEY, loadModelPreference, rememberModelChoice, saveModelPreference } from "@/components/chat/model-preference";
 import { MODELS } from "@/lib/utils";
 
 // The remembered model choice: kept across New Chat, validated against MODELS.
@@ -36,6 +36,31 @@ describe("model preference", () => {
     const storage = memoryStorage();
     saveModelPreference("retired/model", () => storage);
     expect(storage.data.get(MODEL_STORAGE_KEY)).toBe(DEFAULT);
+  });
+
+  it("applies and remembers a header pick", () => {
+    const storage = memoryStorage();
+    const applied: string[] = [];
+    rememberModelChoice(OTHER, (id) => applied.push(id), () => storage);
+    expect(applied).toEqual([OTHER]);
+    expect(storage.data.get(MODEL_STORAGE_KEY)).toBe(OTHER);
+    expect(loadModelPreference(() => storage)).toBe(OTHER);
+  });
+
+  it("applies and remembers the default for an unlisted pick", () => {
+    const storage = memoryStorage();
+    const applied: string[] = [];
+    rememberModelChoice("retired/model", (id) => applied.push(id), () => storage);
+    expect(applied).toEqual([DEFAULT]);
+    expect(storage.data.get(MODEL_STORAGE_KEY)).toBe(DEFAULT);
+  });
+
+  it("still applies a pick when storage is unavailable", () => {
+    const applied: string[] = [];
+    rememberModelChoice(OTHER, (id) => applied.push(id), () => {
+      throw new Error("SecurityError");
+    });
+    expect(applied).toEqual([OTHER]);
   });
 
   it("falls back to the default and does not throw when storage is unavailable", () => {
