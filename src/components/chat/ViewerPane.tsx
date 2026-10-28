@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Download, Camera, Save, ChevronDown } from "lucide-react";
+import { Download, Camera, Save, ChevronDown, Loader2 } from "lucide-react";
 import type { ThreeDViewerRef } from "../ThreeDViewer";
 import ThreeDViewer, { preloadThreeDViewer } from "./lazy-three-viewer";
 import ErrorBoundary from "../ErrorBoundary";
@@ -185,6 +185,23 @@ export default function ViewerPane({
             </div>
           )}
         </ErrorBoundary>
+
+        {/* The mesh on screen is about to be replaced: dim it and say so.
+            pointer-events-none keeps orbit and zoom working underneath. The
+            chat's progress label already announces a turn, so only a local
+            re-render is announced here. */}
+        {displayedStl && (isRendering || isRunning) && (
+          <div className="absolute inset-0 pointer-events-none bg-white/30 dark:bg-gray-900/30 flex items-end justify-center pb-6 animate-in fade-in">
+            <div
+              role={isRendering ? "status" : undefined}
+              aria-hidden={isRendering ? undefined : true}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/90 dark:bg-gray-900/90 border border-gray-200 dark:border-gray-800 shadow-sm text-xs font-medium text-gray-600 dark:text-gray-300"
+            >
+              <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden />
+              {isRendering ? "Rendering..." : "Updating design..."}
+            </div>
+          </div>
+        )}
 
         {/* Stays visible (disabled) during a turn instead of vanishing. */}
         {displayedStl && workingCode && (

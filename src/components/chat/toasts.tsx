@@ -12,10 +12,11 @@ import {
 import { AlertTriangle, Check, X } from "lucide-react";
 
 // Minimal in-house toast system. The app's single pattern for transient
-// feedback (UX audit #8). Every toast auto-dismisses after 4s AND has a manual
-// close button; errors and successes only, no persistent variants.
+// feedback (UX audit #8). Every toast has a manual close button. Successes
+// also auto-dismiss after 4s; errors stay until dismissed, so a message that
+// needs acting on can't vanish before it is read.
 
-const TOAST_DURATION_MS = 4000;
+const SUCCESS_TOAST_DURATION_MS = 4000;
 
 export type ToastVariant = "error" | "success";
 
@@ -48,8 +49,11 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const toast = useCallback(
     (message: string, variant: ToastVariant = "error") => {
       const id = nextId.current++;
-      setToasts((prev) => [...prev, { id, message, variant }]);
-      setTimeout(() => dismiss(id), TOAST_DURATION_MS);
+      // A repeat of a toast still on screen is not stacked (errors stay up).
+      setToasts((prev) =>
+        prev.some((t) => t.variant === variant && t.message === message) ? prev : [...prev, { id, message, variant }],
+      );
+      if (variant === "success") setTimeout(() => dismiss(id), SUCCESS_TOAST_DURATION_MS);
     },
     [dismiss],
   );
