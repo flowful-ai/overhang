@@ -48,13 +48,15 @@ export const CodeBodySchema = z.object({
 // Curated from the 2026-07-02 eval sweep (docs/evals/2026-07-02-model-sweep.md):
 // gemini-2.5-flash removed (0/8, malformed tool calls), deepseek-r1 removed
 // (superseded by v4-flash; reasoning latency blows the 120s turn budget).
-// GPT-5.6 Luna is the default; it was not part of that sweep.
+// GPT-6 Luna is the default (replaced GPT-5.6 Luna 2026-10-29); neither was part
+// of that sweep.
 //
 // webSearch: whether the model gets OpenRouter web search (options built in
 // src/lib/web-search.ts). Enabled only where a live turn (2026-09-15, prompt
 // "Multiboard holder for a Brother P-touch PT-D210") confirmed a search AND
 // the runCadquery call in the same step:
-// - GPT-5.6 Luna, native: confirmed (1 search, then the tool call).
+// - GPT-5.6 Luna, native: confirmed (1 search, then the tool call). GPT-6 Luna
+//   inherits the setting; a live search turn on it is not yet confirmed.
 // - Claude Sonnet 5 (native) and DeepSeek V4 Flash (Parallel, no native
 //   search): search plus a tool call was not confirmed; both turns hit the
 //   120s timeout first. Search may not be the cause (their no-search eval
@@ -65,7 +67,7 @@ export const CodeBodySchema = z.object({
 // supported_parameters (GET /api/v1/models, checked 2026-09-24). Where it is
 // not listed, OpenRouter silently drops it, so the agent turn doesn't send it.
 export const MODELS = [
-  { id: "openai/gpt-5.6-luna", name: "GPT-5.6 Luna", webSearch: "native", temperature: false },
+  { id: "openai/gpt-6-luna", name: "GPT-6 Luna", webSearch: "native", temperature: false },
   { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5", webSearch: false, temperature: false },
   { id: "google/gemini-3-flash-preview", name: "Gemini 3 Flash", webSearch: false, temperature: true },
   { id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", webSearch: false, temperature: true },

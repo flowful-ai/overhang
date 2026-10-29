@@ -14,8 +14,8 @@ describe("MODELS / ALLOWED_MODEL_IDS", () => {
     expect(ALLOWED_MODEL_IDS).toEqual(MODELS.map(m => m.id));
   });
 
-  it("default model is gpt-5.6 luna", () => {
-    expect(ALLOWED_MODEL_IDS[0]).toBe("openai/gpt-5.6-luna");
+  it("default model is gpt-6 luna", () => {
+    expect(ALLOWED_MODEL_IDS[0]).toBe("openai/gpt-6-luna");
   });
 });
 

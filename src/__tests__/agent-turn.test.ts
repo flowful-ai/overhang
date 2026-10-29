@@ -131,7 +131,7 @@ describe("runAgentTurn", () => {
   });
 
   it.each([
-    ["openai/gpt-5.6-luna", undefined],
+    ["openai/gpt-6-luna", undefined],
     ["anthropic/claude-sonnet-5", undefined],
     ["google/gemini-3-flash-preview", 0.2],
     ["deepseek/deepseek-v4-flash", 0.2],

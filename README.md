@@ -29,9 +29,9 @@ git clone https://github.com/flowful-ai/overhang && cd overhang && ./setup.sh
 
 ## Models
 
-Overhang talks to OpenRouter only. The model list is `MODELS` in `src/lib/utils.ts`, and the first entry is the default: GPT-5.6 Luna, Sonnet 5, Gemini 3 Flash (best eval pass rate) and DeepSeek V4 Flash (cheapest, about $0.002 per design). Eval results are in `docs/evals/`; Luna has not been evaluated yet.
+Overhang talks to OpenRouter only. The model list is `MODELS` in `src/lib/utils.ts`, and the first entry is the default: GPT-6 Luna, Sonnet 5, Gemini 3 Flash (best eval pass rate) and DeepSeek V4 Flash (cheapest, about $0.002 per design). Eval results are in `docs/evals/`; Luna has not been evaluated yet.
 
-Web search for product specs is on by default for GPT-5.6 Luna and billed per query. Set `WEB_SEARCH=off` to disable it ([details](docs/configuration.md#web-search)).
+Web search for product specs is on by default for GPT-6 Luna and billed per query. Set `WEB_SEARCH=off` to disable it ([details](docs/configuration.md#web-search)).
 
 ## How it works
 
