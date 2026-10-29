@@ -7,7 +7,7 @@ export async function register() {
       console.warn(
         '\n⚠️  WARNING: OPENROUTER_API_KEY is not set.\n' +
         '   The /api/generate-cad endpoint will not work without it.\n' +
-        '   Set it in your .env.local file or environment variables.\n'
+        '   Set it in your .env file (or the environment) and restart.\n'
       );
     } else {
       console.log('✓ OPENROUTER_API_KEY is configured');

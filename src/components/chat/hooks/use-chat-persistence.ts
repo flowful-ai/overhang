@@ -3,12 +3,16 @@ import type { useChatRuntime } from "@assistant-ui/react-ai-sdk";
 import type { ThreadMessage } from "@assistant-ui/react";
 import { STORAGE_KEY } from "../constants";
 import { createOnceReporter, saveThread, toRepository, type SaveOutcome } from "../persisted-state";
+import { loadModelPreference } from "../model-preference";
+import { ALLOWED_MODEL_IDS } from "@/lib/utils";
 
 interface UseChatPersistenceArgs {
   runtime: ReturnType<typeof useChatRuntime>;
   messages: readonly ThreadMessage[];
   isRunning: boolean;
   model: string;
+  // Receives the restored model: the saved thread's, else the remembered
+  // choice (model-preference.ts). Always an id from MODELS.
   setModel: (m: string) => void;
   // Called at most once per mount when a save fails (quota, storage blocked).
   onPersistError?: (message: string) => void;
@@ -38,11 +42,15 @@ export function useChatPersistence({
   useEffect(() => {
     if (hydratedRef.current) return;
     hydratedRef.current = true;
+    setModel(loadModelPreference());
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (!saved) return;
       const state = JSON.parse(saved);
-      if (typeof state.model === "string") setModel(state.model);
+      // Intentional: a restored thread resumes on the model it was saved with,
+      // over the remembered choice. An id dropped from MODELS keeps the
+      // remembered choice.
+      if (typeof state.model === "string" && ALLOWED_MODEL_IDS.includes(state.model)) setModel(state.model);
       // importExternalState takes the repository shape; a bare message array
       // (what this hook used to write) is linked into one.
       const repo = toRepository(state.messages);

@@ -53,6 +53,7 @@ describe("deriveCurrentDesign", () => {
       currentCode: "",
       currentStl: null,
       latestToolMessageId: null,
+      latestToolPartIndex: null,
     });
   });
 
@@ -65,6 +66,7 @@ describe("deriveCurrentDesign", () => {
       currentCode: "box(10)",
       currentStl: "STL1",
       latestToolMessageId: "a1",
+      latestToolPartIndex: 0,
     });
   });
 
@@ -92,6 +94,26 @@ describe("deriveCurrentDesign", () => {
     expect(out.latestToolMessageId).toBe("a1");
   });
 
+  it("points at the newest successful part when one message rendered twice", () => {
+    const call = (id: string, result: unknown) => ({ type: "tool-call", toolCallId: id, toolName: "runCadquery", args: {}, result });
+    const thread = [
+      {
+        id: "a1",
+        role: "assistant",
+        content: [
+          call("t1", success("box(5)", "STL1")),
+          { type: "text", text: "tweaking" },
+          call("t2", success("box(6)", "STL2")),
+          call("t3", failure("broken", "SyntaxError")),
+        ],
+      },
+    ] as unknown as ThreadMessage[];
+    const out = deriveCurrentDesign(thread);
+    expect(out.currentCode).toBe("box(6)");
+    expect(out.latestToolMessageId).toBe("a1");
+    expect(out.latestToolPartIndex).toBe(2);
+  });
+
   it("ignores tool calls for other tools", () => {
     const thread: ThreadMessage[] = [
       assistantToolCall("a1", "someOtherTool", { irrelevant: true }),
@@ -100,6 +122,7 @@ describe("deriveCurrentDesign", () => {
       currentCode: "",
       currentStl: null,
       latestToolMessageId: null,
+      latestToolPartIndex: null,
     });
   });
 

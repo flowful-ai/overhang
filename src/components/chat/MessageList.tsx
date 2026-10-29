@@ -13,7 +13,7 @@ import CodeEditor from "./lazy-code-editor";
 import type { CadqueryToolResult } from "@/lib/cad-worker-protocol";
 import { TOOL_NAME } from "./constants";
 import RerenderButton from "./RerenderButton";
-import { deriveAgentProgress } from "./agent-progress";
+import { deriveAgentProgress, turnStatsLabel } from "./agent-progress";
 import { extractStreamingCode } from "./streaming-code";
 import { useDesignSession } from "./design-session";
 import { describeChatError, findRetryTarget } from "./chat-error";
@@ -239,6 +239,23 @@ const WarningsCard = memo(function WarningsCard({ warnings }: { warnings: string
   );
 });
 
+// Step count and elapsed time beside the running label. Mounted only while a
+// turn runs, so the clock starts at zero for each turn. Kept out of the
+// aria-live region: a per-second tick would be announced every second.
+function TurnStats({ parts }: { parts: Parameters<typeof turnStatsLabel>[0] }) {
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  useEffect(() => {
+    const start = Date.now();
+    const id = setInterval(() => setElapsedSeconds(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <span className="text-xs text-gray-400 dark:text-gray-500 tabular-nums">
+      {turnStatsLabel(parts, elapsedSeconds)}
+    </span>
+  );
+}
+
 // The scrollable conversation: empty-state examples, the session-restored
 // banner, user/assistant messages (text, tool-call code sections, errors),
 // and the running indicator. Stop lives in the composer.
@@ -252,7 +269,7 @@ export default function MessageList({
   onOpenCodeModal: () => void;
 }) {
   const {
-    latestToolMessageId, restoreFailed,
+    latestToolMessageId, latestToolPartIndex, restoreFailed,
     workingCode, setWorkingCode, isRendering, isModified, rerender,
   } = useDesignSession();
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -322,6 +339,10 @@ export default function MessageList({
     nearBottomRef.current = true;
     messagesEndRef.current?.scrollIntoView({ behavior: smooth ? "smooth" : "instant" });
   }, [messages]);
+
+  // The streamed parts of the running turn's reply, for the progress label.
+  const lastMessage = messages[messages.length - 1];
+  const runningParts = lastMessage?.role === "assistant" ? lastMessage.content : [];
 
   return (
     <div
@@ -402,7 +423,7 @@ export default function MessageList({
                   {snapshotOmitted && !image && (
                     <p className="text-[11px] italic text-gray-400 dark:text-gray-500">Snapshot not kept in history</p>
                   )}
-                  <p className="text-sm text-gray-800 dark:text-gray-100 break-words">{text}</p>
+                  <p className="text-sm text-gray-800 dark:text-gray-100 break-words whitespace-pre-wrap">{text}</p>
                 </div>
               </div>
             </div>
@@ -439,7 +460,9 @@ export default function MessageList({
                     const argsCode = (part.args as { code?: string } | undefined)?.code
                       ?? extractStreamingCode(part.argsText ?? "");
                     const codeToShow = result?.code ?? argsCode ?? "";
-                    const isLastCall = message.id === latestToolMessageId;
+                    // Keyed on the part, not the message: a turn that rendered
+                    // twice must not get two editors bound to one working copy.
+                    const isLastCall = message.id === latestToolMessageId && idx === latestToolPartIndex;
                     const partKey = `${message.id}-${idx}`;
                     const attempt = supersededAttempts.get(idx);
                     if (attempt !== undefined && result && !result.success) {
@@ -523,11 +546,9 @@ export default function MessageList({
           <div className="flex items-center gap-3">
             <div role="status" aria-live="polite" className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
               <Loader2 className="w-4 h-4 animate-spin" aria-hidden />
-              {(() => {
-                const last = messages[messages.length - 1];
-                return deriveAgentProgress(last?.role === "assistant" ? last.content : []);
-              })()}
+              {deriveAgentProgress(runningParts)}
             </div>
+            <TurnStats parts={runningParts} />
           </div>
         </div>
       )}

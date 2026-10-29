@@ -38,6 +38,7 @@ export interface DesignSession {
   currentCode: string;
   currentStl: string | null;
   latestToolMessageId: string | null;
+  latestToolPartIndex: number | null;
   workingCode: string;
   setWorkingCode: (code: string) => void;
   displayedStl: string | null;
@@ -68,7 +69,7 @@ interface BuildArgs {
 // Builds the session. Called once, inside the assistant-ui thread provider
 // (it needs `messages`), then handed to <DesignSessionProvider>.
 export function useProvideDesignSession({ messages, isRunning, workingCodeRef, onError }: BuildArgs): DesignSession {
-  const { currentCode, currentStl, latestToolMessageId } = useMemo(
+  const { currentCode, currentStl, latestToolMessageId, latestToolPartIndex } = useMemo(
     () => deriveCurrentDesign(messages),
     [messages],
   );
@@ -197,6 +198,7 @@ export function useProvideDesignSession({ messages, isRunning, workingCodeRef, o
     currentCode,
     currentStl,
     latestToolMessageId,
+    latestToolPartIndex,
     workingCode,
     setWorkingCode: setWorkingCodeSync,
     displayedStl,

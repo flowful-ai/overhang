@@ -8,9 +8,9 @@ import {
 } from "@assistant-ui/react";
 import { useChatRuntime } from "@assistant-ui/react-ai-sdk";
 import { DefaultChatTransport, type UIMessage } from "ai";
-import { RotateCcw } from "lucide-react";
+import { KeyRound, RotateCcw } from "lucide-react";
 
-import { APP_CONSTANTS, MODELS, ALLOWED_MODEL_IDS } from "@/lib/utils";
+import { APP_CONSTANTS, MODELS, allowedModelId } from "@/lib/utils";
 import { ToastProvider, useToasts } from "./toasts";
 import { forNextTurn } from "./next-turn";
 import { useProvideDesignSession, DesignSessionProvider } from "./design-session";
@@ -31,6 +31,8 @@ import {
 } from "./message-queue";
 import { createQueueDriver, type QueueThread } from "./queue-driver";
 import { loadWebSearchPreference, saveWebSearchPreference } from "./web-search-preference";
+import { rememberModelChoice } from "./model-preference";
+import { hasPendingRender } from "./agent-progress";
 
 // The thread as the message queue uses it. A queued item goes through the
 // same append as a typed message, so the transport applies the basis, image
@@ -48,7 +50,14 @@ function toQueueThread(
   };
 }
 
-export default function ChatInterface({ webSearchAvailable }: { webSearchAvailable: boolean }) {
+export default function ChatInterface({
+  webSearchAvailable, apiKeyMissing,
+}: {
+  webSearchAvailable: boolean;
+  apiKeyMissing: boolean;
+}) {
+  // Starts at the default so the server render matches; the remembered choice
+  // is restored on mount (useChatPersistence).
   const [model, setModel] = useState<string>(MODELS[0].id);
   // Read on first render: nothing rendered on the server depends on it (the
   // settings popover starts closed), so the server default cannot mismatch.
@@ -104,6 +113,7 @@ export default function ChatInterface({ webSearchAvailable }: { webSearchAvailab
           webSearch={webSearch}
           setWebSearch={setWebSearch}
           webSearchAvailable={webSearchAvailable}
+          apiKeyMissing={apiKeyMissing}
           runtime={runtime}
           workingCodeRef={workingCodeRef}
         />
@@ -113,13 +123,14 @@ export default function ChatInterface({ webSearchAvailable }: { webSearchAvailab
 }
 
 function ChatInterfaceInner({
-  model, setModel, webSearch, setWebSearch, webSearchAvailable, runtime, workingCodeRef,
+  model, setModel, webSearch, setWebSearch, webSearchAvailable, apiKeyMissing, runtime, workingCodeRef,
 }: {
   model: string;
   setModel: (m: string) => void;
   webSearch: boolean;
   setWebSearch: (enabled: boolean) => void;
   webSearchAvailable: boolean;
+  apiKeyMissing: boolean;
   runtime: ReturnType<typeof useChatRuntime>;
   workingCodeRef: MutableRefObject<string>;
 }) {
@@ -148,21 +159,23 @@ function ChatInterfaceInner({
   // The design session owns the current design + working copy + preview render;
   // the panes read it from context. Inner only needs displayedStl (mobile badge)
   // and reset (New Chat).
-  const session = useProvideDesignSession({ messages, isRunning, workingCodeRef, onError: toast });
+  // Errors the user has to act on (a failed render, storage full, a prompt
+  // over the limit) stay until dismissed; other toasts auto-dismiss.
+  const toastPersistent = useCallback((m: string) => toast(m, "error", { persistent: true }), [toast]);
+  const session = useProvideDesignSession({ messages, isRunning, workingCodeRef, onError: toastPersistent });
   const { displayedStl } = session;
   // Persisted model ids can predate a dropdown change; fall back to the
   // default instead of displaying a raw unknown id in the header.
-  const setModelSafe = useCallback(
-    (m: string) => setModel(ALLOWED_MODEL_IDS.includes(m) ? m : MODELS[0].id),
-    [setModel],
-  );
+  const setModelSafe = useCallback((m: string) => setModel(allowedModelId(m)), [setModel]);
+  // A pick from the header is remembered across New Chat and reloads.
+  const chooseModel = useCallback((m: string) => rememberModelChoice(m, setModel), [setModel]);
   const { clearPersisted } = useChatPersistence({
     runtime,
     messages,
     isRunning,
     model,
     setModel: setModelSafe,
-    onPersistError: toast,
+    onPersistError: toastPersistent,
   });
 
   // Resize handler for the divider. RAF-coalesces state updates to one per frame.
@@ -252,7 +265,7 @@ function ChatInterfaceInner({
         setPendingImage(null);
         setMobileTab("chat");
         setModelTabBadge(false);
-        setModel(MODELS[0].id);
+        // The model is kept: it is a preference, not part of the conversation.
       },
       clearPersisted,
     });
@@ -290,7 +303,12 @@ function ChatInterfaceInner({
     queueDriver.observe(toQueueThread(threadRuntime, appendUserMessage), { isRunning, messages });
   }, [queueDriver, threadRuntime, appendUserMessage, isRunning, messages]);
 
-  const tooLongMessage = `Prompt exceeds maximum length of ${APP_CONSTANTS.MAX_PROMPT_LENGTH.toLocaleString()} characters.`;
+  // The running turn is producing a new mesh (not a text-only reply): the
+  // viewer dims the current one.
+  const lastMessage = messages[messages.length - 1];
+  const turnRendering = isRunning && lastMessage?.role === "assistant" && hasPendingRender(lastMessage.content);
+
+  const tooLongMessage =`Prompt exceeds maximum length of ${APP_CONSTANTS.MAX_PROMPT_LENGTH.toLocaleString()} characters.`;
 
   // Local re-renders (isRendering) don't lock the composer, only an active
   // AI turn does (UX audit #6), and during a turn sending queues instead.
@@ -304,14 +322,14 @@ function ChatInterfaceInner({
         image: pendingImage,
         maxLength: APP_CONSTANTS.MAX_PROMPT_LENGTH,
       });
-      if (rejected === "too-long") toast(tooLongMessage);
+      if (rejected === "too-long") toastPersistent(tooLongMessage);
       if (rejected === "full") {
         toast(`The queue is full (${MAX_QUEUED_MESSAGES} messages). Remove one or wait for the reply.`);
       }
       if (rejected) return;
     } else {
       const invalid = validateOutgoing(prompt, pendingImage, APP_CONSTANTS.MAX_PROMPT_LENGTH);
-      if (invalid === "too-long") toast(tooLongMessage);
+      if (invalid === "too-long") toastPersistent(tooLongMessage);
       if (invalid) return;
       appendUserMessage(outgoingText(prompt, pendingImage), pendingImage);
     }
@@ -357,11 +375,26 @@ function ChatInterfaceInner({
     <div className="flex flex-col h-dvh max-h-dvh bg-gray-50 dark:bg-gray-950 overflow-hidden text-gray-800 dark:text-gray-100">
       <Header
         model={model}
-        setModel={setModel}
+        setModel={chooseModel}
         webSearch={webSearch}
         setWebSearch={setWebSearch}
         webSearchAvailable={webSearchAvailable}
       />
+
+      {/* Not dismissable: nothing can be generated until the key is set. */}
+      {apiKeyMissing && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 px-6 py-2.5 shrink-0 bg-red-50 dark:bg-red-950/40 border-b border-red-200 dark:border-red-900 text-red-700 dark:text-red-300 text-sm"
+        >
+          <KeyRound className="w-4 h-4 mt-0.5 shrink-0" aria-hidden />
+          <span>
+            No OpenRouter API key is configured, so designs can&apos;t be generated. Set{" "}
+            <code className="font-mono text-[13px]">OPENROUTER_API_KEY</code> in{" "}
+            <code className="font-mono text-[13px]">.env</code>, then restart the server.
+          </span>
+        </div>
+      )}
 
       {/* Mobile tab switch (UX audit #14): Chat and Model each get the full
           height below the header instead of a cramped 55vh split. */}
@@ -476,6 +509,7 @@ function ChatInterfaceInner({
           mobileTab={mobileTab}
           isDesktop={isDesktop}
           isRunning={isRunning}
+          turnRendering={turnRendering}
           setPendingImage={setPendingImage}
         />
       </main>

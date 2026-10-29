@@ -12,12 +12,16 @@ export interface CurrentDesign {
   // this to mark which tool-call card is the "live" one (editable editor +
   // active Re-render button).
   latestToolMessageId: string | null;
+  // Index of that tool call within the message's content. A turn can render
+  // successfully more than once; only this part gets the live editor.
+  latestToolPartIndex: number | null;
 }
 
 const EMPTY: CurrentDesign = {
   currentCode: "",
   currentStl: null,
   latestToolMessageId: null,
+  latestToolPartIndex: null,
 };
 
 /**
@@ -38,6 +42,7 @@ export function deriveCurrentDesign(messages: readonly ThreadMessage[]): Current
           currentCode: result.code,
           currentStl: result.stlBase64 ?? null,
           latestToolMessageId: m.id,
+          latestToolPartIndex: j,
         };
       }
     }

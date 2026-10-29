@@ -4,12 +4,12 @@ import { useCallback, useRef, useState } from "react";
 import Image from "next/image";
 import { Settings, Cpu, ChevronDown, Globe } from "lucide-react";
 import ThemeToggle from "../ThemeToggle";
-import { MODELS, modelSupportsWebSearch } from "@/lib/utils";
+import { MODELS, allowedModelId, modelSupportsWebSearch } from "@/lib/utils";
 import { usePopoverDismiss } from "./hooks/use-popover-dismiss";
 import { webSearchToggleState } from "./web-search-preference";
 
-// App header: logo, model dropdown, theme toggle, and settings popover (model,
-// web search). Each popover owns its open/closed state; dismissal (outside
+// App header: logo, model dropdown, theme toggle, and settings popover (web
+// search). Each popover owns its open/closed state; dismissal (outside
 // click and Escape) is handled locally by usePopoverDismiss.
 export default function Header({
   model, setModel, webSearch, setWebSearch, webSearchAvailable,
@@ -35,6 +35,9 @@ export default function Header({
   usePopoverDismiss(settingsRef, showSettings, closeSettings);
   usePopoverDismiss(modelMenuRef, showModelMenu, closeModelMenu);
 
+  // An unknown id (e.g. dropped from MODELS) shows as the default it falls back to.
+  const modelName = MODELS.find((m) => m.id === allowedModelId(model))?.name ?? MODELS[0].name;
+
   const searchToggle = webSearchToggleState({
     serverAvailable: webSearchAvailable,
     modelSupported: modelSupportsWebSearch(model),
@@ -58,7 +61,8 @@ export default function Header({
         </div>
       </div>
       <div className="flex items-center gap-2">
-        <div className="hidden md:block relative" ref={modelMenuRef}>
+        {/* The only model picker, so it shows on mobile too, as an icon. */}
+        <div className="relative" ref={modelMenuRef}>
           <button
             onClick={() => setShowModelMenu((v) => !v)}
             className={`flex items-center gap-2 text-sm px-2 py-1.5 rounded-lg transition-colors ${
@@ -66,17 +70,18 @@ export default function Header({
                 ? "bg-primary-50 dark:bg-primary-950/40 text-primary-600 dark:text-primary-400"
                 : "text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800"
             }`}
+            aria-label={`Model: ${modelName}`}
             aria-haspopup="menu"
             aria-expanded={showModelMenu}
           >
             <Cpu className="w-4 h-4" />
-            <span>{MODELS.find((m) => m.id === model)?.name || model}</span>
+            <span className="hidden md:inline">{modelName}</span>
             <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showModelMenu ? "rotate-180" : ""}`} />
           </button>
           {showModelMenu && (
             <div
               role="menu"
-              className="absolute top-full left-0 mt-2 w-56 bg-white dark:bg-gray-900 rounded-lg shadow-lg border border-gray-200 dark:border-gray-800 py-1 animate-in slide-in-from-top-2 z-50"
+              className="absolute top-full right-0 md:right-auto md:left-0 mt-2 w-56 bg-white dark:bg-gray-900 rounded-lg shadow-lg border border-gray-200 dark:border-gray-800 py-1 animate-in slide-in-from-top-2 z-50"
             >
               {MODELS.map((m) => (
                 <button
@@ -111,21 +116,7 @@ export default function Header({
           </button>
           {showSettings && (
             <div className="absolute top-full right-0 mt-2 w-64 bg-white dark:bg-gray-900 rounded-lg shadow-lg border border-gray-200 dark:border-gray-800 p-4 space-y-2 animate-in slide-in-from-top-2 z-50">
-              <label className="text-sm font-medium text-gray-700 dark:text-gray-200 block">AI Model</label>
-              <div className="relative">
-                <Cpu className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 dark:text-gray-500 pointer-events-none" />
-                <select
-                  className="w-full pl-9 pr-3 py-2 text-sm border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-primary-500 focus:outline-none appearance-none bg-white dark:bg-gray-900"
-                  aria-label="AI Model"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                >
-                  {MODELS.map((m) => (
-                    <option key={m.id} value={m.id}>{m.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex items-center justify-between gap-3 pt-2">
+              <div className="flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2 min-w-0">
                   <Globe className="w-4 h-4 shrink-0 text-gray-400 dark:text-gray-500" aria-hidden="true" />
                   <div className="leading-tight">

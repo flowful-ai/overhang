@@ -3,7 +3,9 @@
 // sees the raw response body (e.g. `{"error":"Too many requests..."}`) with no
 // status code. The server's JSON error contract (src/lib/api-handler.ts,
 // src/lib/in-flight.ts, src/app/api/generate-cad/route.ts) is matched on its
-// message text instead. Pure; unit-tested in chat-error.test.ts.
+// message text instead; a streamed provider error carries the upstream status
+// in its text as "(HTTP 401)" (src/app/api/generate-cad/handler.ts). Pure;
+// unit-tested in chat-error.test.ts.
 
 export interface ChatErrorInfo {
   message: string;
@@ -48,6 +50,31 @@ export function extractErrorText(err: unknown): string {
 // First match wins, so specific rules precede the generic ones they overlap
 // (the image size cap before the request body cap).
 const RULES: { test: RegExp; info: ChatErrorInfo }[] = [
+  // 500 before the turn starts: the server has no OpenRouter key (agent-turn.ts).
+  {
+    test: /OPENROUTER_API_KEY is not configured/,
+    info: {
+      message: "No OpenRouter API key is configured. Set OPENROUTER_API_KEY in .env, then restart the server.",
+      retryable: false,
+    },
+  },
+  // Streamed provider errors carry the upstream status (generate-cad handler):
+  // 401 is a revoked or mistyped key.
+  {
+    test: /\(HTTP 401\)/,
+    info: {
+      message: "OpenRouter rejected the API key. Check OPENROUTER_API_KEY in .env, then restart the server.",
+      retryable: false,
+    },
+  },
+  // 402: the OpenRouter account has run out of credits.
+  {
+    test: /\(HTTP 402\)|insufficient credits/i,
+    info: {
+      message: "Your OpenRouter account is out of credits. Add credits at openrouter.ai/settings/credits, then retry.",
+      retryable: true,
+    },
+  },
   // 400: a single snapshot over the server's image cap.
   {
     test: /image attachment too large/i,

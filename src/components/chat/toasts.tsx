@@ -4,29 +4,29 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
   type ReactNode,
 } from "react";
 import { AlertTriangle, Check, X } from "lucide-react";
+import { addToast, toastDuration, type ToastItem, type ToastVariant } from "./toast-list";
 
 // Minimal in-house toast system. The app's single pattern for transient
-// feedback (UX audit #8). Every toast auto-dismisses after 4s AND has a manual
-// close button; errors and successes only, no persistent variants.
+// feedback (UX audit #8). Every toast has a manual close button and
+// auto-dismisses after 4s, unless raised as persistent: errors the user has to
+// act on stay until dismissed, so they can't vanish before they are read.
+// The list rules live in toast-list.ts.
 
-const TOAST_DURATION_MS = 4000;
+export type { ToastVariant };
 
-export type ToastVariant = "error" | "success";
-
-interface ToastItem {
-  id: number;
-  message: string;
-  variant: ToastVariant;
+export interface ToastOptions {
+  persistent?: boolean;
 }
 
 interface ToastContextValue {
-  toast: (message: string, variant?: ToastVariant) => void;
+  toast: (message: string, variant?: ToastVariant, options?: ToastOptions) => void;
 }
 
 const ToastContext = createContext<ToastContextValue | null>(null);
@@ -39,20 +39,51 @@ export function useToasts(): ToastContextValue {
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  // Mirrors `toasts` so toast() can dedupe against the current list and know
+  // which toast's timer to (re)start, outside a state updater.
+  const listRef = useRef<ToastItem[]>([]);
+  const timersRef = useRef(new Map<number, ReturnType<typeof setTimeout>>());
   const nextId = useRef(0);
 
-  const dismiss = useCallback((id: number) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
+  const clearTimer = useCallback((id: number) => {
+    const timer = timersRef.current.get(id);
+    if (timer !== undefined) clearTimeout(timer);
+    timersRef.current.delete(id);
   }, []);
 
-  const toast = useCallback(
-    (message: string, variant: ToastVariant = "error") => {
-      const id = nextId.current++;
-      setToasts((prev) => [...prev, { id, message, variant }]);
-      setTimeout(() => dismiss(id), TOAST_DURATION_MS);
+  const dismiss = useCallback(
+    (id: number) => {
+      clearTimer(id);
+      listRef.current = listRef.current.filter((t) => t.id !== id);
+      setToasts(listRef.current);
     },
-    [dismiss],
+    [clearTimer],
   );
+
+  const toast = useCallback(
+    (message: string, variant: ToastVariant = "error", options?: ToastOptions) => {
+      const { list, shown } = addToast(
+        listRef.current,
+        { message, variant, persistent: !!options?.persistent },
+        nextId.current++,
+      );
+      listRef.current = list;
+      setToasts(list);
+      // A repeat restarts the clock of the toast it merged into.
+      clearTimer(shown.id);
+      const duration = toastDuration(shown);
+      if (duration !== null) timersRef.current.set(shown.id, setTimeout(() => dismiss(shown.id), duration));
+    },
+    [clearTimer, dismiss],
+  );
+
+  useEffect(() => {
+    const timers = timersRef.current;
+    return () => {
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+    };
+  }, []);
 
   const value = useMemo(() => ({ toast }), [toast]);
 
