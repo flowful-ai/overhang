@@ -24,7 +24,7 @@ Overhang reads its settings from `.env`, which `setup.sh` creates from `.env.exa
 
 ## Web search
 
-The agent can look up product specs through OpenRouter web search, on the first step of a turn only. The model decides how many queries that step runs, and each is billed by the provider (about $0.01 per query on GPT-5.6 Luna). It is enabled per model in `MODELS` (`src/lib/utils.ts`), currently GPT-5.6 Luna only.
+The agent can look up product specs through OpenRouter web search, on the first step of a turn only. The model decides how many queries that step runs, and each is billed by the provider (about $0.01 per query on GPT-6 Luna). It is enabled per model in `MODELS` (`src/lib/utils.ts`), currently GPT-6 Luna only.
 
 Only unset, empty, `on`, `1` or `true` enable it. Any other value, such as `off`, disables it for everyone and greys out the toggle in Settings. Users can also turn it off in Settings.
 

@@ -23,7 +23,7 @@ import {
 // options in the agent turn (checked on the HTTP body OpenRouter receives), the
 // request flag in the handler, and the user's stored preference.
 
-const LUNA = "openai/gpt-5.6-luna";
+const LUNA = "openai/gpt-6-luna";
 const CUBE = "import cadquery as cq\nresult = cq.Workplane().box(10,10,10)";
 const NATIVE_SEARCH = {
   plugins: [{ id: "web", engine: "native", max_results: WEB_SEARCH_MAX_RESULTS }],
