@@ -130,6 +130,8 @@ describe("runAgentTurn", () => {
       const toolSteps = Math.floor((AGENT_TURN_TIMEOUT_MS - FINAL_REPLY_RESERVE_MS) / renderMs) + 1;
       expect(toolSteps).toBeLessThan(MAX_AGENT_STEPS - 1);
       expect(choices).toEqual([...Array(toolSteps).fill("auto"), "none"]);
+      expect(JSON.stringify(doStream.mock.calls.at(-1)![0].prompt.at(-1))).toContain("out of time");
+      expect(JSON.stringify(doStream.mock.calls.at(-2)![0].prompt)).not.toContain("out of time");
       expect(await stream.text).toBe("Done.");
     } finally {
       now.mockRestore();
@@ -149,6 +151,7 @@ describe("runAgentTurn", () => {
 
     const choices = doStream.mock.calls.map(([options]) => options.toolChoice?.type);
     expect(choices).toEqual([...Array(MAX_AGENT_STEPS - 1).fill("auto"), "none"]);
+    expect(JSON.stringify(doStream.mock.calls.at(-1)![0].prompt)).not.toContain("out of time");
   });
 
   it.each([

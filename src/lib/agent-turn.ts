@@ -88,11 +88,21 @@ export const AGENT_TURN_TIMEOUT_MS = 240_000;
 
 /**
  * Tools go off early once less than this is left of AGENT_TURN_TIMEOUT_MS:
- * another render (up to the worker's 30 s limit) plus the model's reply
- * would risk the timeout, which ends the turn with an error instead of a
- * reply. One model step plus one render, with margin.
+ * another render step would risk the timeout, which ends the turn with an
+ * error instead of a reply. The check runs before a step, so the reserve has
+ * to fit that step's model call (~15-25 s), its render (up to the worker's
+ * 30 s limit) and the final reply step (~15-25 s), with margin.
  */
-export const FINAL_REPLY_RESERVE_MS = 45_000;
+export const FINAL_REPLY_RESERVE_MS = 90_000;
+
+/**
+ * Sent when tools go off before the last step: the system prompt promises
+ * renders until then, so without it the model may promise a re-render that
+ * never happens.
+ */
+export const OUT_OF_TIME_NOTE =
+  "Note from the tool, not the user: this turn is out of time, so no more runCadquery calls are possible. " +
+  "Reply now with the current state of the design and anything you could not verify or fix.";
 
 /** Text that introduces the preview images injected after a successful render. */
 export function renderViewsIntro(views: RenderView[]): string {
@@ -169,11 +179,15 @@ function agentStepPreparer(
     messages: ModelMessage[];
   }): StepOverrides => {
     const overrides: StepOverrides = {};
+    const lastStep = stepNumber >= MAX_AGENT_STEPS - 1;
     const outOfTime = Date.now() - turnStartedAt > AGENT_TURN_TIMEOUT_MS - FINAL_REPLY_RESERVE_MS;
-    if (stepNumber >= MAX_AGENT_STEPS - 1 || outOfTime) overrides.toolChoice = "none";
+    if (lastStep || outOfTime) overrides.toolChoice = "none";
     else if (stepNumber === 0 && webSearchOptions) overrides.providerOptions = webSearchOptions;
+    const extra: ModelMessage[] = [];
     const viewsMessage = renderViews ? renderViewsMessage(steps, renderViews) : null;
-    if (viewsMessage) overrides.messages = [...messages, viewsMessage];
+    if (viewsMessage) extra.push(viewsMessage);
+    if (outOfTime && !lastStep) extra.push({ role: "user", content: OUT_OF_TIME_NOTE });
+    if (extra.length > 0) overrides.messages = [...messages, ...extra];
     return overrides;
   };
 }

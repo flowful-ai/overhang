@@ -886,6 +886,9 @@ def _cylindrical_holes(solid: "cq.Solid", deadline: float = math.inf) -> list[di
                     # Just past the bore, and past where a drill-point cone or
                     # ball end (at most one radius long) would stop: a blind
                     # hole's tip is empty but the material beyond it is not.
+                    # Known miss: a through hole whose exit has more of the
+                    # same solid within ~1 radius (e.g. one arm of a narrow
+                    # U-channel) reads as blind.
                     outside(foot + d * t)
                     for t in (g["t0"] - 0.1, g["t0"] - tip, g["t1"] + 0.1, g["t1"] + tip)
                 ),
