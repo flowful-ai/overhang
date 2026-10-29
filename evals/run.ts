@@ -12,7 +12,7 @@ import { sumReported } from "../src/lib/usage";
 import { webSearchProviderOptions } from "../src/lib/web-search";
 import { caseCostDecision, stepUsage, type CostDecision, type StepUsage } from "./cost";
 import { callCadWorker, pingCadWorker } from "../src/lib/cad-worker";
-import type { BoundingBox } from "../src/lib/cad-worker-protocol";
+import type { BoundingBox, GeometryReport } from "../src/lib/cad-worker-protocol";
 import { EVAL_CASES, type EvalCase } from "./cases";
 import { scoreCase, type CaseScore } from "./scoring";
 import {
@@ -107,7 +107,7 @@ async function runCase(
 ): Promise<{ result: CaseRunResult; cost: CostDecision }> {
   const requestId = `eval-${evalCase.id}-${Date.now()}`;
   const workerCalls: WorkerCallFixture[] = [];
-  let lastRender: { bbox: BoundingBox; warnings: string[] } | null = null;
+  let lastRender: { bbox: BoundingBox; warnings: string[]; geometry?: GeometryReport } | null = null;
 
   // The live worker, recording every call for the fixture.
   const worker: AgentWorker = {
@@ -147,8 +147,8 @@ async function runCase(
       worker,
       requestId,
       webSearch,
-      onRender: ({ bbox, warnings }) => {
-        lastRender = { bbox, warnings };
+      onRender: ({ bbox, warnings, geometry }) => {
+        lastRender = { bbox, warnings, geometry };
       },
     });
     if (!turn.ok) throw new Error("cad-worker is not reachable");
@@ -173,11 +173,12 @@ async function runCase(
   }
 
   const durationMs = Date.now() - started;
-  const render = lastRender as { bbox: BoundingBox; warnings: string[] } | null;
+  const render = lastRender as { bbox: BoundingBox; warnings: string[]; geometry?: GeometryReport } | null;
   const score = scoreCase(evalCase.expect, {
     rendered: render !== null,
     bbox: render?.bbox ?? null,
     warnings: render?.warnings ?? [],
+    geometry: render?.geometry ?? null,
   });
   const metrics: RunMetrics = {
     stepsUsed: stepUsages.length,
@@ -224,17 +225,23 @@ async function runCase(
   return { result, cost: caseCostDecision(stepUsages) };
 }
 
+/** Feature column: holes and solids found, or "-" when the case or render has no feature score. */
+function fmtFeatures(score: CaseScore): string {
+  if (score.featuresOk === undefined) return "-";
+  return `${score.featuresOk ? "✅" : "❌"} ${score.holes ?? "?"}h/${score.solids ?? "?"}s`;
+}
+
 function printReport(model: string, results: CaseRunResult[]) {
   const fmtCost = (c: number | null) => (c === null ? "n/a" : `$${c.toFixed(4)}`);
   console.log(`\n## ${model}\n`);
-  console.log("| case | pass | rendered | watertight | bbox | warnings | steps | tokens in/out | cost | time |");
-  console.log("|---|---|---|---|---|---|---|---|---|---|");
+  console.log("| case | pass | rendered | watertight | bbox | features | warnings | steps | tokens in/out | cost | time |");
+  console.log("|---|---|---|---|---|---|---|---|---|---|---|");
   for (const r of results) {
     const m = r.metrics;
     const mark = (b: boolean) => (b ? "✅" : "❌");
     console.log(
       `| ${r.caseId}${r.hard ? " (hard)" : ""} | ${mark(r.score.pass)} | ${mark(r.score.rendered)} | ` +
-        `${mark(r.score.watertight)} | ${mark(r.score.bboxOk)} | ${r.score.warningsCount} | ${m.stepsUsed} | ` +
+        `${mark(r.score.watertight)} | ${mark(r.score.bboxOk)} | ${fmtFeatures(r.score)} | ${r.score.warningsCount} | ${m.stepsUsed} | ` +
         `${m.inputTokens ?? "?"}/${m.outputTokens ?? "?"} | ${fmtCost(m.costUsd)} | ${(m.durationMs / 1000).toFixed(1)}s |` +
         (r.error ? ` <!-- error: ${r.error.slice(0, 120)} -->` : ""),
     );

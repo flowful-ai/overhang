@@ -42,7 +42,7 @@ Web search for product specs is on by default for GPT-6 Luna and billed per quer
 +----------+    stream     +-------------+   {success, warnings, stl}  +-------------+
 ```
 
-The LLM holds a `runCadquery` tool and decides when to call it, fix and stop. A turn is capped at 5 steps, and tools are disabled on the last one, so a turn always ends with a text reply. Printability warnings go both to the model and to you, as a card in the chat.
+The LLM holds a `runCadquery` tool and decides when to call it, fix and stop. It plans the key dimensions, fit features and print orientation first, then checks each render against that plan: the worker returns a geometry report (solids, holes, lowest point, thinnest wall, steepest overhang) and, for models that take images, three shaded views. A turn is capped at 8 steps, and tools are disabled on the last one, so a turn always ends with a text reply. Printability issues go to the model classified as blocking or advisory, and to you as a card in the chat.
 
 | Goal | Prompt |
 |------|--------|

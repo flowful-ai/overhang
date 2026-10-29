@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import type { GeometryReport } from "../src/lib/cad-worker-protocol";
 import { scoreCase, type CaseExpectation, type ObservedOutcome } from "./scoring";
 
 describe("scoreCase", () => {
@@ -160,5 +161,78 @@ describe("scoreCase", () => {
     const result = scoreCase(expectation, observed);
     expect(result.watertight).toBe(false);
     expect(result.pass).toBe(false);
+  });
+});
+
+describe("scoreCase features", () => {
+  const geometry = (over: Partial<GeometryReport> = {}): GeometryReport => ({
+    solid_count: 1,
+    z_min: 0,
+    bounds_min: [0, 0, 0],
+    bounds_max: [60, 40, 5],
+    valid: true,
+    faces: { plane: 6, cylinder: 3 },
+    holes: [{ diameter: 3.4, depth: 5, axis: "Z", through: true, count: 3 }],
+    hole_count: 3,
+    min_wall_mm: 3,
+    overhang: null,
+    solids: [{ volume: 100, bbox: { x: 60, y: 40, z: 5 }, z_min: 0 }],
+    ...over,
+  });
+  const observed = (g: GeometryReport | null): ObservedOutcome => ({
+    rendered: true,
+    bbox: { x: 60, y: 40, z: 5 },
+    warnings: [],
+    geometry: g,
+  });
+
+  it("passes when hole and solid counts are in range, and reports them", () => {
+    const result = scoreCase({ holes: [3, 3], solids: [1, 1] }, observed(geometry()));
+    expect(result).toMatchObject({ holes: 3, solids: 1, featuresOk: true, pass: true });
+  });
+
+  it("fails a render with the right size but missing holes", () => {
+    const result = scoreCase({ holes: [3, 3] }, observed(geometry({ holes: [], hole_count: 0 })));
+    expect(result.bboxOk).toBe(true);
+    expect(result).toMatchObject({ holes: 0, featuresOk: false, pass: false });
+  });
+
+  it("fails a hole expectation when holes were not measured", () => {
+    const result = scoreCase({ holes: [3, 3] }, observed(geometry({ holes: [], hole_count: null })));
+    expect(result).toMatchObject({ holes: null, featuresOk: false, pass: false });
+  });
+
+  it("fails an unexpected number of solids", () => {
+    expect(scoreCase({ solids: [1, 1] }, observed(geometry({ solid_count: 2 }))).pass).toBe(false);
+  });
+
+  it("skips feature scoring without a geometry report (fixtures recorded before it)", () => {
+    const result = scoreCase({ holes: [3, 3], solids: [1, 1] }, observed(null));
+    expect(result).not.toHaveProperty("featuresOk");
+    expect(result).not.toHaveProperty("holes");
+    expect(result.pass).toBe(true);
+  });
+
+  it("skips feature scoring for cases without feature expectations", () => {
+    expect(scoreCase({}, observed(geometry()))).not.toHaveProperty("featuresOk");
+  });
+
+  describe("matchingFootprints (lid covers box)", () => {
+    const box = { volume: 9000, bbox: { x: 50, y: 30, z: 20 }, z_min: 0 };
+    const lid = (x: number, y: number) => ({ volume: 4000, bbox: { x, y, z: 7.5 }, z_min: 0 });
+
+    it("passes when the two parts' footprints agree within the tolerance", () => {
+      const g = geometry({ solid_count: 2, solids: [lid(30.4, 50.2), box] });
+      expect(scoreCase({ solids: [2, 2], matchingFootprints: 1 }, observed(g)).featuresOk).toBe(true);
+    });
+
+    it("fails a lid that does not cover the box", () => {
+      const g = geometry({ solid_count: 2, solids: [box, lid(45.7, 25.7)] });
+      expect(scoreCase({ matchingFootprints: 1 }, observed(g)).featuresOk).toBe(false);
+    });
+
+    it("fails a single body", () => {
+      expect(scoreCase({ matchingFootprints: 1 }, observed(geometry())).featuresOk).toBe(false);
+    });
   });
 });

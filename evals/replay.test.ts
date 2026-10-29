@@ -3,7 +3,7 @@ import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import type { LanguageModelV3CallOptions, LanguageModelV3StreamPart } from "@ai-sdk/provider";
 import { MAX_AGENT_STEPS } from "../src/components/chat/constants";
 import { runAgentTurn, type AgentWorker } from "../src/lib/agent-turn";
-import type { BoundingBox } from "../src/lib/cad-worker-protocol";
+import type { BoundingBox, GeometryReport } from "../src/lib/cad-worker-protocol";
 import { EVAL_CASES } from "./cases";
 import { loadFixtures, type Fixture, type LlmStepFixture } from "./recorder";
 import { scoreCase } from "./scoring";
@@ -54,6 +54,16 @@ function streamPartsForStep(step: LlmStepFixture, index: number): LanguageModelV
 // toolChoice (fixtures that used every step were recorded before the final
 // step disabled tools). It records what each call was offered instead, and the
 // test asserts what the turn passed on every step.
+//
+// A fixture recorded under a smaller step cap can end on a tool call; the turn
+// now has steps left and asks for one more. The mock closes it with one
+// synthetic text step (CLOSING_STEP), and only in that case.
+const CLOSING_STEP: LlmStepFixture = { text: "(end of recorded fixture)", toolCalls: [], finishReason: "stop" };
+
+function endsOnToolCall(fixture: Fixture): boolean {
+  return (fixture.llmSteps.at(-1)?.toolCalls.length ?? 0) > 0;
+}
+
 function mockModelFromFixture(fixture: Fixture, calls: LanguageModelV3CallOptions[]): MockLanguageModelV3 {
   let call = 0;
   return new MockLanguageModelV3({
@@ -61,7 +71,8 @@ function mockModelFromFixture(fixture: Fixture, calls: LanguageModelV3CallOption
     doStream: async (options: LanguageModelV3CallOptions) => {
       calls.push(options);
       const index = call++;
-      const step = fixture.llmSteps[index];
+      const closing = index === fixture.llmSteps.length && endsOnToolCall(fixture);
+      const step = closing ? CLOSING_STEP : fixture.llmSteps[index];
       if (!step) throw new Error(`Mock LLM exhausted after ${fixture.llmSteps.length} steps`);
       return { stream: simulateReadableStream({ chunks: streamPartsForStep(step, index) }) };
     },
@@ -85,7 +96,7 @@ describe("eval fixture replay", () => {
       let workerIdx = 0;
       const codeMismatches: Array<{ call: number; sent: string; recorded: string }> = [];
       const workerSignals: Array<AbortSignal | undefined> = [];
-      let lastRender: { bbox: BoundingBox; warnings: string[] } | null = null;
+      let lastRender: { bbox: BoundingBox; warnings: string[]; geometry?: GeometryReport } | null = null;
       const worker: AgentWorker = {
         ping: async () => true,
         render: async (code, _requestId, options) => {
@@ -109,8 +120,8 @@ describe("eval fixture replay", () => {
         prompt: evalCase.prompt,
         worker,
         requestId: `replay-${fixture.caseId}`,
-        onRender: ({ bbox, warnings }) => {
-          lastRender = { bbox, warnings };
+        onRender: ({ bbox, warnings, geometry }) => {
+          lastRender = { bbox, warnings, geometry };
         },
         onSettled,
       });
@@ -127,7 +138,7 @@ describe("eval fixture replay", () => {
       expect(workerIdx).toBe(fixture.workerCalls.length);
 
       // Tools stay on until the last allowed step, then the turn turns them off.
-      expect(calls).toHaveLength(fixture.llmSteps.length);
+      expect(calls).toHaveLength(fixture.llmSteps.length + (endsOnToolCall(fixture) ? 1 : 0));
       calls.forEach((options, step) =>
         expect(options.toolChoice?.type).toBe(step === MAX_AGENT_STEPS - 1 ? "none" : "auto"),
       );
@@ -147,11 +158,12 @@ describe("eval fixture replay", () => {
         expect(signal?.aborted).toBe(false);
       }
 
-      const render = lastRender as { bbox: BoundingBox; warnings: string[] } | null;
+      const render = lastRender as { bbox: BoundingBox; warnings: string[]; geometry?: GeometryReport } | null;
       const score = scoreCase(evalCase.expect, {
         rendered: render !== null,
         bbox: render?.bbox ?? null,
         warnings: render?.warnings ?? [],
+        geometry: render?.geometry ?? null,
       });
       expect(score).toEqual(fixture.score);
     });

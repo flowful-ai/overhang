@@ -7,7 +7,10 @@ import type { CaseExpectation } from "./scoring";
 //
 // Assertions are ranges, not exact values: LLM output legitimately varies.
 // `sortedBbox` ranges apply to the bounding-box dimensions sorted descending,
-// so a bracket laid flat and one stood upright score the same.
+// so a bracket laid flat and one stood upright score the same. `holes`,
+// `solids` and `matchingFootprints` score features from the worker's geometry
+// report (see CaseExpectation): a render can have the right size and still
+// miss the holes the prompt asked for.
 
 export interface EvalCase {
   id: string;
@@ -31,6 +34,7 @@ export const EVAL_CASES: EvalCase[] = [
         [15, 50],
       ],
       watertight: true,
+      solids: [1, 1],
     },
   },
   {
@@ -43,6 +47,9 @@ export const EVAL_CASES: EvalCase[] = [
         [2, 45],
       ],
       watertight: true,
+      // "3 holes for M3 screws"; a counterbored or countersunk hole counts once.
+      holes: [3, 3],
+      solids: [1, 1],
     },
   },
   {
@@ -55,6 +62,7 @@ export const EVAL_CASES: EvalCase[] = [
         [3, 90],
       ],
       watertight: true,
+      solids: [1, 1],
     },
   },
   {
@@ -68,6 +76,9 @@ export const EVAL_CASES: EvalCase[] = [
         [2, 40],
       ],
       watertight: true,
+      // The screw hole, plus the cable channel when the clip closes around it.
+      holes: [1, 2],
+      solids: [1, 1],
     },
   },
   {
@@ -80,6 +91,7 @@ export const EVAL_CASES: EvalCase[] = [
         [2, 10],
       ],
       watertight: true,
+      solids: [1, 1],
     },
   },
   {
@@ -92,6 +104,7 @@ export const EVAL_CASES: EvalCase[] = [
         [40, 75],
       ],
       watertight: true,
+      solids: [1, 1],
     },
   },
   {
@@ -100,7 +113,10 @@ export const EVAL_CASES: EvalCase[] = [
     // Multi-part output (box + lid, often a cq.Assembly); the combined
     // bounding box depends on how the parts are laid out, so only require a
     // valid watertight render.
-    expect: { watertight: true },
+    // Fit proxy: the lid covers the box, so their footprints match within
+    // 1mm. A lid that sits inside the opening fails it; the prompt does not
+    // ask for one.
+    expect: { watertight: true, solids: [2, 2], matchingFootprints: 1 },
     hard: true,
   },
   {
@@ -113,6 +129,9 @@ export const EVAL_CASES: EvalCase[] = [
         [3, 15],
       ],
       watertight: true,
+      // 6 bolt holes, plus a centre bore if the model adds one.
+      holes: [6, 7],
+      solids: [1, 1],
     },
     hard: true,
   },

@@ -40,6 +40,8 @@ function workerError(message: string, workerStatus?: number): WorkerCallError {
 export interface WorkerCallOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** /render only: also return the shaded preview images (the agent's visual self-check). */
+  views?: boolean;
 }
 
 async function callWorker<T>(
@@ -47,7 +49,7 @@ async function callWorker<T>(
   code: string,
   requestId: string,
   schema: ZodType<T>,
-  { timeoutMs = 60_000, signal }: WorkerCallOptions = {},
+  { timeoutMs = 60_000, signal, views }: WorkerCallOptions = {},
 ): Promise<T> {
   if (code.length > APP_CONSTANTS.MAX_CODE_LENGTH) {
     throw new Error(`Code exceeds maximum length of ${APP_CONSTANTS.MAX_CODE_LENGTH.toLocaleString()} characters`);
@@ -74,7 +76,7 @@ async function callWorker<T>(
     response = await fetch(`${CAD_WORKER_URL}${path}`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ code }),
+      body: JSON.stringify(views ? { code, views: true } : { code }),
       signal: fetchSignal,
     });
   } catch (e: unknown) {
@@ -135,7 +137,7 @@ export function httpStatusForWorkerFailure(workerStatus: number | undefined): nu
 /**
  * Liveness probe for the CAD worker's /health endpoint. Returns true only if
  * the worker answers OK within `timeoutMs`. Used to fail fast before opening a
- * paid LLM stream (so an outage doesn't cost ~5x the tokens for zero output)
+ * paid LLM stream (so an outage doesn't cost several times the tokens for zero output)
  * and by /api/health?deep=1. Never throws.
  */
 export async function pingCadWorker(timeoutMs = 2000): Promise<boolean> {

@@ -3,7 +3,13 @@ import { z } from "zod";
 import { APP_CONSTANTS, BUILD_VOLUME_MM } from "./utils";
 import { renderCad, type RenderWorker } from "./cad-render";
 import { MAX_AGENT_STEPS } from "@/components/chat/constants";
-import type { BoundingBox, CadqueryToolResult } from "./cad-worker-protocol";
+import type {
+  BoundingBox,
+  CadqueryToolResult,
+  GeometryReport,
+  RenderIssue,
+  RenderView,
+} from "./cad-worker-protocol";
 
 // Internal home of the CAD agent's system prompt and runCadquery tool. A turn
 // is only ever built from them by the agent turn module (agent-turn.ts), which
@@ -35,8 +41,16 @@ Loop discipline (a turn has ${MAX_AGENT_STEPS} steps; you can call the tool in t
 - On \`success: false\`: read the error, fix the *root cause*, and call again. Do NOT resend the same code or make a near-identical attempt — that wastes a step.
 - After 2 failed attempts on the same approach: switch strategies (different geometry construction, simpler primitives) rather than tweaking parameters.
 - If after 3 attempts you still cannot produce valid geometry, STOP calling the tool and emit a brief plain-text reply explaining what failed and what the user could try (e.g. "I couldn't construct the lofted handle; try asking for a simpler cylindrical mug first.").
-- On warnings (non-watertight, overhangs, thin walls): fix them when the user asked for printability/quality or when severe; ignore them when cosmetic and unrelated to the user's request.
-- After a successful render, briefly describe what you made (1-2 sentences) — dimensions, key features, anything the user should know.
+- Issues come classified. BLOCKING (not a closed solid, off the build plate, walls or parts too thin to print): fix every one before you finish, or say plainly why you could not. Advisory (overhangs needing supports, walls under the recommended 1.2mm, part not at z=0, disjoint or floating solids, invalid BRep): fix it when it contradicts the request or your planned print orientation, otherwise mention it in one line. Do not spend renders on advisories the user did not ask about.
+- After the result matches your plan, briefly describe what you made (1-2 sentences): dimensions, key features, anything the user should know.
+
+## Plan, then verify
+"Render OK" only means the script ran. Before your first \`runCadquery\` call, write a short plan (a few lines, no code):
+- Key dimensions: every number in the request, plus the ones you choose (walls, clearances).
+- Interfaces and fit features: holes (count, diameter, through or blind), slots, cutouts, mating parts and their clearance, the product or standard it must fit.
+- Print orientation: which face sits on the bed at z=0, and why.
+Each successful render returns a geometry report: solid count, lowest point, round holes (count, diameter, through or blind, axis), face types, thinnest wall, steepest overhang. When images are attached after it, they are shaded views of that render (isometric, top, front; holes show as background in the top view).
+After each successful render, compare the result with your plan item by item: bounding box against the key dimensions, hole count and diameters against the interfaces, solid count (1 for one part, one per part for an assembly), lowest point at z=0 in the planned orientation, and in the images every planned feature present, on the intended face, nothing missing or floating. If anything does not match, fix it and render again before you reply. In the reply, say what you checked and anything you could not verify.
 
 Prior turns include your previous tool calls and their results — read them to know what the current model looks like before modifying.
 
@@ -149,7 +163,7 @@ thick = 5.0    # mm
 hole_d = 3.5   # mm - M3 clearance
 result = (
     cq.Workplane("XY")
-    .box(width, depth, thick)
+    .box(width, depth, thick, centered=(True, True, False))
     .edges("|Z").fillet(3)
     .faces(">Z").workplane()
     .rect(width - 10, depth - 10, forConstruction=True)
@@ -261,7 +275,7 @@ positions = [(x * pitch_x - (cols-1)*pitch_x/2, y * pitch_y - (rows-1)*pitch_y/2
 # Fillet the outline BEFORE cutting the slots (pitfall: fillet then cut)
 result = (
     cq.Workplane("XY")
-    .box(width, depth, height)
+    .box(width, depth, height, centered=(True, True, False))
     .edges("|Z").fillet(2)
     .faces(">Z").workplane()
     .pushPoints(positions)
@@ -365,6 +379,9 @@ export interface RenderReport {
   code: string;
   bbox: BoundingBox;
   warnings: string[];
+  issues: RenderIssue[];
+  /** Absent when the worker (or a recorded eval fixture) predates it. */
+  geometry?: GeometryReport;
 }
 
 export interface RunCadqueryToolOptions {
@@ -380,20 +397,82 @@ export interface RunCadqueryToolOptions {
    * the rendered code and metrics.
    */
   onRender?: (render: RenderReport) => void;
+  /**
+   * Ask the worker for preview images of each successful render and hand
+   * them here, keyed by tool call. They stay out of the tool result (which
+   * streams to the UI and is stored with the chat); the agent turn shows them
+   * to the model in the next step. Leave unset for models without image input.
+   */
+  onViews?: (toolCallId: string, views: RenderView[]) => void;
 }
 
-export function createRunCadqueryTool({ requestId, worker, onRender }: RunCadqueryToolOptions) {
+const fmt = (n: number) => String(Number(n.toFixed(2)));
+
+/** The geometry report as one line for the model. */
+export function describeGeometry(g: GeometryReport): string {
+  const parts: string[] = [];
+  parts.push(g.solid_count === 1 ? "1 solid" : `${g.solid_count} separate solids`);
+  if (g.z_min !== null) parts.push(`lowest point z=${fmt(g.z_min)}mm`);
+  if (g.hole_count === null) parts.push("holes: not measured");
+  else if (g.hole_count === 0) parts.push("no round holes");
+  else {
+    const holes = g.holes.map(
+      (h) =>
+        `${h.count}x d${fmt(h.diameter)} ${h.through ? "through" : `blind ${fmt(h.depth)}mm deep`} along ${h.axis}`,
+    );
+    parts.push(`${g.hole_count} round holes: ${holes.join(", ")}`);
+  }
+  const faces = Object.entries(g.faces)
+    .map(([kind, n]) => `${n} ${kind}`)
+    .join(", ");
+  if (faces) parts.push(`faces: ${faces}`);
+  if (g.min_wall_mm !== null) parts.push(`thinnest wall ~${fmt(g.min_wall_mm)}mm`);
+  if (g.overhang) {
+    const [x, y, z] = g.overhang.at.map(fmt);
+    parts.push(`steepest overhang ${fmt(g.overhang.worst_deg)} deg from vertical at (${x}, ${y}, ${z})`);
+  }
+  if (g.valid === false) parts.push("BRep INVALID");
+  return `Geometry: ${parts.join("; ")}.`;
+}
+
+/** The summary line the model reads for a successful render. */
+export function renderSummary(r: {
+  bbox: BoundingBox;
+  warnings: string[];
+  issues: RenderIssue[];
+  geometry?: GeometryReport;
+}): string {
+  const { x, y, z } = r.bbox;
+  const out = [`Render OK. Bounding box: ${x.toFixed(1)}x${y.toFixed(1)}x${z.toFixed(1)}mm.`];
+  if (r.geometry) out.push(describeGeometry(r.geometry));
+  // Workers that predate issues only send warnings: show those unclassified.
+  const issues = r.issues.length ? r.issues : r.warnings.map((message) => ({ severity: null, message }));
+  const blocking = issues.filter((i) => i.severity === "blocking").map((i) => i.message);
+  const advisory = issues.filter((i) => i.severity === "advisory").map((i) => i.message);
+  const other = issues.filter((i) => i.severity === null).map((i) => i.message);
+  if (blocking.length) out.push(`BLOCKING issues (fix before finishing): ${blocking.join("; ")}`);
+  if (advisory.length) out.push(`Advisory: ${advisory.join("; ")}`);
+  if (other.length) out.push(`Design review: ${other.join("; ")}`);
+  if (!issues.length) out.push("No issues.");
+  return out.join(" ");
+}
+
+export function createRunCadqueryTool({ requestId, worker, onRender, onViews }: RunCadqueryToolOptions) {
   return tool({
     description:
-      "Render a complete CadQuery Python script to STL. Returns success/failure plus mesh-validation warnings (non-watertight, overhangs, thin walls). On failure, fix the script and call again. On warnings, decide whether they need fixing.",
+      "Render a complete CadQuery Python script to STL. Returns success/failure, the bounding box, a geometry report (solid count, lowest point, holes, face types, thinnest wall, steepest overhang) and printability issues classified as blocking or advisory. On failure, fix the script and call again. After a success, check the report against your plan.",
     inputSchema: z.object({
       code: z
         .string()
         .max(APP_CONSTANTS.MAX_CODE_LENGTH)
         .describe("Complete CadQuery Python script. Must define a `result` variable. ASCII only."),
     }),
-    execute: async ({ code }, { abortSignal }): Promise<CadqueryToolResult> => {
-      const r = await renderCad(code, requestId, { callWorker: worker, signal: abortSignal });
+    execute: async ({ code }, { abortSignal, toolCallId }): Promise<CadqueryToolResult> => {
+      const r = await renderCad(code, requestId, {
+        callWorker: worker,
+        signal: abortSignal,
+        ...(onViews ? { views: true } : {}),
+      });
       if (!r.success) {
         // A 503 that outlasted renderCad's retries is load, not the code.
         // Returned as a plain failure, the model "fixes" working code and burns
@@ -402,17 +481,17 @@ export function createRunCadqueryTool({ requestId, worker, onRender }: RunCadque
         return { success: false, code: r.code, error };
       }
       const { x, y, z } = r.metrics.bbox;
-      onRender?.({ code: r.code, bbox: { x, y, z }, warnings: r.warnings });
-      const head = `Render OK. Bounding box: ${x.toFixed(1)}x${y.toFixed(1)}x${z.toFixed(1)}mm.`;
+      onRender?.({ code: r.code, bbox: { x, y, z }, warnings: r.warnings, issues: r.issues, geometry: r.geometry });
+      if (onViews && r.views?.length) onViews(toolCallId, r.views);
       return {
         success: true,
         code: r.code,
         stlBase64: r.stlBase64,
         warnings: r.warnings,
+        ...(r.issues.length ? { issues: r.issues } : {}),
+        ...(r.geometry ? { geometry: r.geometry } : {}),
         metrics: r.metrics,
-        summary: r.warnings.length
-          ? `${head} Design review: ${r.warnings.join("; ")}`
-          : `${head} No warnings.`,
+        summary: renderSummary({ bbox: { x, y, z }, warnings: r.warnings, issues: r.issues, geometry: r.geometry }),
       };
     },
     // What the MODEL sees as the tool result. The full result (with the STL)
@@ -434,7 +513,18 @@ export const SAME_CODE_AS_INPUT = "(identical to the code argument of this call)
 /** A runCadquery result as the model sees it. Defensive: history outputs come from the client. */
 function resultForModel(input: unknown, output: CadqueryToolResult): JSONValue {
   if (typeof output !== "object" || output === null) return (output ?? null) as JSONValue;
-  const { stlBase64: _omit, ...rest } = output as CadqueryToolResult & { stlBase64?: string };
+  // `issues` and `geometry` are dropped too: the summary already states them
+  // as text, and every prior result is re-sent on each later step and turn.
+  const {
+    stlBase64: _omit,
+    issues: _issues,
+    geometry: _geometry,
+    ...rest
+  } = output as CadqueryToolResult & {
+    stlBase64?: string;
+    issues?: unknown;
+    geometry?: unknown;
+  };
   const inputCode = (input as { code?: unknown } | undefined)?.code;
   if (typeof inputCode === "string" && rest.code === inputCode) return { ...rest, code: SAME_CODE_AS_INPUT };
   return rest as JSONValue;

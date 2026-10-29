@@ -11,4 +11,11 @@ export const STORAGE_KEY = "overhang-chat-state";
 // the server agent turn (the step cap in src/lib/agent-turn.ts) and
 // the client progress label (deriveAgentProgress). Lives in this client-safe
 // module so the browser bundle never pulls in the server prompt to read it.
-export const MAX_AGENT_STEPS = 5;
+//
+// 8: the agent plans, renders, checks the result against its plan (geometry
+// report and preview images) and fixes mismatches, so a turn that verifies
+// needs ~2 more steps than one that stops at the first successful render. The
+// last step has tools off, so up to 7 renders. Each step re-sends the
+// conversation, so the extra steps cost input tokens only when the model uses
+// them; AGENT_TURN_TIMEOUT_MS (agent-turn.ts) is sized for this cap.
+export const MAX_AGENT_STEPS = 8;

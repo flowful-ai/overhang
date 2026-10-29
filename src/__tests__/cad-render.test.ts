@@ -30,8 +30,28 @@ describe("renderCad", () => {
       code: "code - here",
       stlBase64: "STL",
       warnings: ["thin wall"],
+      issues: [],
       metrics: { bbox: { x: 1, y: 2, z: 3 }, volume: 6 },
     });
+  });
+
+  it("passes through issues, geometry and requested views", async () => {
+    const geometry = {
+      solid_count: 1, z_min: 0, bounds_min: [0, 0, 0], bounds_max: [1, 2, 3], valid: true, faces: { plane: 6 },
+      holes: [], hole_count: 0, min_wall_mm: 1, overhang: null, solids: [],
+    };
+    const issues = [{ severity: "advisory" as const, message: "Overhang warning" }];
+    const views = [{ name: "iso", png_base64: "PNG" }];
+    const callWorker = vi.fn(async () => okWorker({ warnings: ["Overhang warning"], issues, geometry, views }));
+    const r = await renderCad("code", "req-v", { callWorker, views: true });
+    expect(callWorker.mock.calls[0]).toEqual(["code", "req-v", expect.objectContaining({ views: true })]);
+    expect(r).toMatchObject({ success: true, issues, geometry, views });
+  });
+
+  it("does not ask for views unless requested", async () => {
+    const callWorker = vi.fn(async () => okWorker());
+    await renderCad("code", "req-nv", { callWorker });
+    expect(callWorker.mock.calls[0]).toEqual(["code", "req-nv", { signal: undefined }]);
   });
 
   it("coalesces null warnings to an empty array", async () => {

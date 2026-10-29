@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Request, Header
 from pydantic import BaseModel, field_validator
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from typing import Optional
+from typing import Literal, Optional
 import ast
 import builtins
 import cadquery as cq
@@ -10,6 +10,7 @@ from OCP.BRep import BRep_Tool
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.TopLoc import TopLoc_Location
 import trimesh
+from views import render_views
 import numpy as np
 import math
 import tempfile
@@ -197,6 +198,10 @@ MAX_CODE_LENGTH = 50_000
 
 class RenderRequest(BaseModel):
     code: str
+    # Also return shaded preview images (views.py) for the model's visual
+    # self-check. Off by default: manual re-renders and models without image
+    # input don't need them.
+    views: bool = False
 
     @field_validator("code")
     @classmethod
@@ -222,10 +227,59 @@ class WorkerMetricsModel(BaseModel):
     volume: float
 
 
+class IssueModel(BaseModel):
+    severity: Literal["blocking", "advisory"]
+    message: str
+
+
+class HoleModel(BaseModel):
+    diameter: float
+    depth: float
+    axis: str
+    through: bool
+    count: int
+
+
+class OverhangModel(BaseModel):
+    worst_deg: float  # from vertical; 90 = flat ceiling
+    at: list[float]
+    area_mm2: float
+
+
+class SolidModel(BaseModel):
+    volume: float
+    bbox: BBox
+    z_min: float
+
+
+class GeometryModel(BaseModel):
+    solid_count: int
+    z_min: Optional[float] = None
+    bounds_min: Optional[list[float]] = None
+    bounds_max: Optional[list[float]] = None
+    valid: Optional[bool] = None
+    faces: dict[str, int] = {}
+    holes: list[HoleModel] = []
+    hole_count: Optional[int] = None  # None = not measured
+    min_wall_mm: Optional[float] = None
+    overhang: Optional[OverhangModel] = None
+    solids: list[SolidModel] = []
+
+
+class ViewModel(BaseModel):
+    name: str
+    png_base64: str
+
+
 class RenderResponse(BaseModel):
     stl_base64: str
     metrics: WorkerMetricsModel
+    # Messages of `issues`, in the same order (kept for older consumers).
     warnings: Optional[list[str]] = None
+    issues: Optional[list[IssueModel]] = None
+    geometry: Optional[GeometryModel] = None
+    # Only when the request asked for them (RenderRequest.views).
+    views: Optional[list[ViewModel]] = None
     console_output: Optional[str] = None
 
 
@@ -421,90 +475,531 @@ def _has_wide_overhang_patch(tm, problem: "np.ndarray", areas: "np.ndarray") -> 
     return bool(np.any((comp_area > OVERHANG_PATCH_MIN_AREA_MM2) & (width > OVERHANG_PATCH_MIN_WIDTH_MM)))
 
 
-def validate_mesh(stl_bytes: bytes) -> list[str]:
-    """Validate STL mesh and return printability warnings."""
-    warnings = []
-    try:
-        tm = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", force="mesh")
+# Every printability finding is an issue with a severity:
+# - "blocking": the file will not print as intended (not a closed solid,
+#   off the build plate, walls or features below what a 0.4 mm nozzle can lay
+#   down). The model must fix these before finishing.
+# - "advisory": printable, but worth a look (supports needed, walls under the
+#   recommended minimum, a part not resting on z = 0, an invalid BRep that
+#   still meshed closed). The model fixes them when they conflict with the
+#   request and otherwise mentions them.
+BLOCKING = "blocking"
+ADVISORY = "advisory"
 
-        if not hasattr(tm, 'vertices') or len(tm.vertices) == 0:
-            warnings.append("Empty geometry: STL contains no vertices")
-            return warnings
+
+def _issue(severity: str, message: str) -> dict:
+    return {"severity": severity, "message": message}
+
+
+# Recommended minimum wall (system prompt's design table) and the floor below
+# which a 0.4 mm nozzle cannot lay down two perimeters: thinner walls or parts
+# are blocking, thinner than recommended is advisory.
+MIN_WALL_MM = 1.2
+MIN_PRINTABLE_MM = 0.8
+
+# Wall thickness by ray casting: THIN_WALL_SAMPLES points sampled on the
+# surface (area-weighted, fixed seed), each shooting a ray inward along the
+# surface normal against the exact BRep; the distance to where the ray leaves
+# the material is the local thickness. Thin walls are flagged when at least
+# THIN_WALL_MIN_SAMPLES samples covering THIN_WALL_MIN_AREA_MM2 read below
+# MIN_WALL_MM, so a single wall is caught on any part while a sharp edge or a
+# fillet seam (a sample or two) is not. The old 2 * volume / area estimate
+# flagged every small solid part (a 3 mm cube reads 1.0 mm) and averaged a
+# single thin wall away on a big one.
+THIN_WALL_SAMPLES = 2000
+THIN_WALL_MIN_SAMPLES = 3
+# Fewer successful readings than this (deadline hit, odd geometry): no verdict.
+THIN_WALL_MIN_MEASURED = 200
+THIN_WALL_MIN_AREA_MM2 = 2.0
+# A ray reading counts as a wall only when the exit face is within this
+# angle of facing the entry face (see wall_thickness_samples).
+THIN_WALL_MAX_EXIT_DEG = 45.0
+# Measurement slack: a wall modeled at exactly MIN_WALL_MM reads a hair under.
+THIN_WALL_SLACK_MM = 0.02
+
+# A part counts as resting on the build plate when its lowest point is within
+# this distance of z = 0.
+BED_TOLERANCE_MM = 0.1
+
+# Worst-overhang report: the steepest overhang angle reached by at least this
+# much problem area, so a speck of fillet tessellation does not set it.
+OVERHANG_WORST_MIN_AREA_MM2 = 1.0
+
+
+def _fmt_point(p) -> str:
+    return "(" + ", ".join(f"{float(v):.1f}" for v in p) + ")"
+
+
+def load_mesh(stl_bytes: bytes):
+    """Load an STL for inspection. An empty mesh or one with non-finite
+    vertices is returned as loaded, for inspect_mesh to report."""
+    tm = trimesh.load(io.BytesIO(stl_bytes), file_type="stl", force="mesh")
+    if not hasattr(tm, "vertices") or len(tm.vertices) == 0:
+        return tm
+    if not np.isfinite(tm.vertices).all():
+        return tm
+    # OCC emits a few zero-area triangles where a face collapses to a point
+    # (sphere poles, fillet corners, revolves touching the axis). Their
+    # collapsed edges break trimesh's edge-pairing, so perfectly closed
+    # solids read as non-watertight. trimesh.load(process=True) has already
+    # welded coincident vertices, so a collapsed triangle repeats a vertex
+    # index; drop exactly those. Collinear slivers with three distinct
+    # vertices are kept: they still pair edges with their neighbours, and
+    # dropping them could open a false hole. Genuine holes still leave
+    # unpaired edges.
+    f = tm.faces
+    tm.update_faces((f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2]))
+    return tm
+
+
+def _overhang_issue(tm) -> tuple[Optional[dict], Optional[dict]]:
+    """Overhang analysis: surface area of down-facing faces steeper than 45
+    degrees. Faces resting on the build plate (all vertices at z ~ z_min) are
+    supported by the bed and excluded — otherwise every flat-bottomed part
+    warns (the bottom of a plain cube is 2 of 12 faces = 17%). Area-weighted,
+    not face-count-weighted: triangle counts scale with tessellation density,
+    so a curved body would dilute the same physical overhang that a boxy body
+    concentrates into a few triangles.
+
+    Returns (issue or None, report or None). The report (worst angle from
+    vertical, where, problem area) is returned whenever any face overhangs,
+    even below the warning thresholds."""
+    normals = tm.face_normals
+    areas = tm.area_faces
+    total_area = float(areas.sum())
+    if total_area <= 0:
+        return None, None
+    z_min = float(tm.bounds[0][2])
+    tri_max_z = tm.triangles[:, :, 2].max(axis=1)
+    on_plate = tri_max_z < z_min + PLATE_CONTACT_EPSILON_MM
+    angles_from_down = np.degrees(np.arccos(np.clip(-normals[:, 2], -1, 1)))
+    # 0 = straight down (worst overhang), 90 = vertical (safe)
+    problem = (normals[:, 2] < 0) & (angles_from_down < 90 - OVERHANG_MAX_ANGLE_DEG) & ~on_plate
+    problem_area = float(areas[problem].sum())
+    if problem_area <= 0:
+        return None, None
+
+    idx = np.flatnonzero(problem)
+    order = idx[np.argsort(angles_from_down[idx])]
+    reached = np.cumsum(areas[order]) >= min(OVERHANG_WORST_MIN_AREA_MM2, problem_area)
+    worst_from_down = float(angles_from_down[order[int(np.argmax(reached))]])
+    # Location: the largest triangle within 5 degrees of the worst angle, so
+    # the point lies on a real overhang (a centroid of several patches may not).
+    near = order[angles_from_down[order] <= worst_from_down + 5.0]
+    at = tm.triangles_center[near[int(np.argmax(areas[near]))]]
+    worst_deg = 90.0 - worst_from_down  # from vertical: 90 = flat ceiling
+    report = {
+        "worst_deg": round(worst_deg, 1),
+        "at": [round(float(v), 1) for v in at],
+        "area_mm2": round(problem_area, 1),
+    }
+
+    problem_pct = problem_area / total_area * 100
+    # Total problem area bounds any single patch's area, so the O(1)
+    # comparison skips the face-adjacency build for clean meshes —
+    # the common case, since this runs on every render.
+    if problem_pct > OVERHANG_PCT_THRESHOLD or (
+        problem_area > OVERHANG_PATCH_MIN_AREA_MM2
+        and _has_wide_overhang_patch(tm, problem, areas)
+    ):
+        return _issue(
+            ADVISORY,
+            f"Overhang warning: {problem_pct:.0f}% of the surface "
+            f"({problem_area:.0f} mm2) overhangs more than "
+            f"{OVERHANG_MAX_ANGLE_DEG:.0f} degrees and may need supports. "
+            f"Worst: {worst_deg:.0f} degrees from vertical at {_fmt_point(at)}"
+            f"{' (a flat ceiling: bridge it under 20 mm or chamfer it)' if worst_deg > 85 else ''}.",
+        ), report
+    return None, report
+
+
+def wall_thickness_samples(shape: "cq.Shape", tm, samples: int = THIN_WALL_SAMPLES, deadline: float = math.inf):
+    """Local wall thickness at `samples` surface points (see THIN_WALL_SAMPLES).
+    Returns (thickness mm, points) arrays; NaN where the ray found no exit or
+    left through a corner rather than the far side of a wall.
+
+    Each ray starts just outside the surface (the mesh lies within the export
+    tolerance of the BRep, on either side) and the thickness is the distance
+    between its first two hits: entry, then exit. Near an edge whose faces
+    meet at an acute angle (a vase rim, a chamfered lip) a ray leaves through
+    the neighbouring face after a short distance although the wall itself is
+    thick; a real wall's far face looks back at the ray (THIN_WALL_MAX_EXIT_DEG),
+    so a reading is kept only then. Rays not cast by `deadline`
+    (time.monotonic()) stay NaN."""
+    from OCP.BRepGProp import BRepGProp_Face
+    from OCP.IntCurvesFace import IntCurvesFace_ShapeIntersector
+    from OCP.gp import gp_Dir, gp_Lin, gp_Pnt, gp_Vec
+
+    points, face_idx = trimesh.sample.sample_surface(tm, samples, seed=0)
+    normals = tm.face_normals[face_idx]
+    offset = 0.05 + 3 * export_tolerance_mm(shape)
+    cos_exit = math.cos(math.radians(THIN_WALL_MAX_EXIT_DEG))
+    intersector = IntCurvesFace_ShapeIntersector()
+    intersector.Load(shape.wrapped, 1e-4)
+    out = np.full(len(points), np.nan)
+    for i, (p, n) in enumerate(zip(points, normals)):
+        if time.monotonic() > deadline:
+            break
+        o = p + n * offset
+        intersector.Perform(gp_Lin(gp_Pnt(*o), gp_Dir(*(-n))), 0.0, 1e9)
+        hits = []
+        for w, k in sorted((intersector.WParameter(k), k) for k in range(1, intersector.NbPnt() + 1)):
+            # Coincident faces (separate solids that touch) are one surface.
+            if not hits or w - hits[-1][0] > 1e-3:
+                hits.append((w, k))
+        if len(hits) < 2:
+            continue
+        k = hits[1][1]
+        pnt, exit_n = gp_Pnt(), gp_Vec()
+        BRepGProp_Face(intersector.Face(k)).Normal(intersector.UParameter(k), intersector.VParameter(k), pnt, exit_n)
+        mag = exit_n.Magnitude()
+        # Outward normals of the two sides of a wall point apart.
+        if mag > 0 and (exit_n.X() * n[0] + exit_n.Y() * n[1] + exit_n.Z() * n[2]) / mag > -cos_exit:
+            continue
+        out[i] = hits[1][0] - hits[0][0]
+    return out, points
+
+
+def _thin_wall_issue(shape: "cq.Shape", tm, deadline: float = math.inf) -> tuple[Optional[dict], Optional[float]]:
+    """(issue or None, robust minimum wall thickness in mm or None)."""
+    thickness, points = wall_thickness_samples(shape, tm, deadline=deadline)
+    ok = np.isfinite(thickness)
+    if ok.sum() < THIN_WALL_MIN_MEASURED:
+        return None, None
+    # 2nd percentile: the thinnest wall that covers a real share of the part.
+    min_wall = round(float(np.percentile(thickness[ok], 2)), 2)
+    thin = ok & (thickness < MIN_WALL_MM - THIN_WALL_SLACK_MM)
+    sample_area = float(tm.area) / len(thickness)
+    thin_area = int(thin.sum()) * sample_area
+    if thin.sum() < THIN_WALL_MIN_SAMPLES or thin_area < THIN_WALL_MIN_AREA_MM2:
+        return None, min_wall
+    thin_t = thickness[thin]
+    typical = float(np.median(thin_t))
+    at = points[thin][int(np.argmin(np.abs(thin_t - typical)))]
+    severity = BLOCKING if typical < MIN_PRINTABLE_MM else ADVISORY
+    return _issue(
+        severity,
+        f"Thin walls: about {thin_area:.0f} mm2 of the surface sits on walls under "
+        f"{MIN_WALL_MM}mm (typically {typical:.2f}mm, e.g. near {_fmt_point(at)}). "
+        f"Minimum recommended: {MIN_WALL_MM}mm"
+        + (f"; under {MIN_PRINTABLE_MM}mm will not print reliably." if severity == BLOCKING else "."),
+    ), min_wall
+
+
+# Per-solid watertightness is checked for at most this many solids.
+MAX_WATERTIGHT_SOLIDS = 16
+
+
+def _solids_watertight(shape: "cq.Shape", deadline: float) -> Optional[bool]:
+    """For a multi-solid shape whose combined mesh is open: True when every
+    solid meshes closed on its own (the openness comes from parts touching),
+    False when one does not, None when not checked (one solid, too many, or
+    past the deadline)."""
+    solids = shape.Solids()
+    if not 1 < len(solids) <= MAX_WATERTIGHT_SOLIDS:
+        return None
+    for solid in solids:
+        if time.monotonic() > deadline:
+            return None
+        if not load_mesh(export_to_bytes(solid, "STL", ".stl")).is_watertight:
+            return False
+    return True
+
+
+def inspect_mesh(tm, shape: Optional["cq.Shape"] = None, deadline: float = math.inf) -> tuple[list[dict], dict]:
+    """Printability checks on the export mesh. Returns (issues, report) where
+    report carries the overhang summary and the estimated minimum wall
+    (min_wall_mm; needs the BRep `shape` for ray casting, None without it)."""
+    issues: list[dict] = []
+    report: dict = {"overhang": None, "min_wall_mm": None}
+    try:
+        if not hasattr(tm, "vertices") or len(tm.vertices) == 0:
+            issues.append(_issue(BLOCKING, "Empty geometry: STL contains no vertices"))
+            return issues, report
 
         if not np.isfinite(tm.vertices).all():
-            warnings.append("Invalid geometry: mesh contains NaN or infinite coordinates")
-            return warnings
-
-        # OCC emits a few zero-area triangles where a face collapses to a point
-        # (sphere poles, fillet corners, revolves touching the axis). Their
-        # collapsed edges break trimesh's edge-pairing, so perfectly closed
-        # solids read as non-watertight. trimesh.load(process=True) has already
-        # welded coincident vertices, so a collapsed triangle repeats a vertex
-        # index; drop exactly those. Collinear slivers with three distinct
-        # vertices are kept: they still pair edges with their neighbours, and
-        # dropping them could open a false hole. Genuine holes still leave
-        # unpaired edges.
-        f = tm.faces
-        tm.update_faces((f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2]))
+            issues.append(_issue(BLOCKING, "Invalid geometry: mesh contains NaN or infinite coordinates"))
+            return issues, report
 
         if not tm.is_watertight:
-            warnings.append("Non-watertight mesh: may cause slicing issues. Check for unclosed shells or boolean artifacts.")
+            per_body = _solids_watertight(shape, deadline) if shape is not None else None
+            if per_body:
+                # Separate solids that touch share edges in the combined
+                # mesh, which reads as open although every part is closed.
+                issues.append(_issue(
+                    ADVISORY,
+                    "Non-watertight mesh where separate solids touch: each solid is closed, "
+                    "but a slicer may merge or misread the shared faces. Leave a gap between "
+                    "parts printed together, or fuse them with .union().",
+                ))
+            else:
+                issues.append(_issue(
+                    BLOCKING,
+                    "Non-watertight mesh: may cause slicing issues. Check for unclosed shells or boolean artifacts.",
+                ))
 
-        # Overhang analysis: surface area of down-facing faces steeper than 45
-        # degrees. Faces resting on the build plate (all vertices at z ~ z_min)
-        # are supported by the bed and excluded — otherwise every flat-bottomed
-        # part warns (the bottom of a plain cube is 2 of 12 faces = 17%).
-        # Area-weighted, not face-count-weighted: triangle counts scale with
-        # tessellation density, so a curved body would dilute the same physical
-        # overhang that a boxy body concentrates into a few triangles.
-        normals = tm.face_normals
-        areas = tm.area_faces
-        total_area = float(areas.sum())
-        if total_area > 0:
-            z_min = float(tm.bounds[0][2])
-            tri_max_z = tm.triangles[:, :, 2].max(axis=1)
-            on_plate = tri_max_z < z_min + PLATE_CONTACT_EPSILON_MM
-            angles_from_down = np.degrees(np.arccos(np.clip(-normals[:, 2], -1, 1)))
-            # 0 = straight down (worst overhang), 90 = vertical (safe)
-            problem = (normals[:, 2] < 0) & (angles_from_down < 90 - OVERHANG_MAX_ANGLE_DEG) & ~on_plate
-            problem_area = float(areas[problem].sum())
-            problem_pct = problem_area / total_area * 100
-            # Total problem area bounds any single patch's area, so the O(1)
-            # comparison skips the face-adjacency build for clean meshes —
-            # the common case, since this runs on every render.
-            if problem_pct > OVERHANG_PCT_THRESHOLD or (
-                problem_area > OVERHANG_PATCH_MIN_AREA_MM2
-                and _has_wide_overhang_patch(tm, problem, areas)
-            ):
-                warnings.append(
-                    f"Overhang warning: {problem_pct:.0f}% of the surface "
-                    f"({problem_area:.0f} mm2) overhangs more than "
-                    f"{OVERHANG_MAX_ANGLE_DEG:.0f} degrees and may need supports."
-                )
+        overhang, report["overhang"] = _overhang_issue(tm)
+        if overhang:
+            issues.append(overhang)
 
-        # Thin geometry detection
+        # Thin geometry detection: the whole part is thin along some axis.
         bb = tm.bounding_box.extents  # [x, y, z] in mm
         min_dim = float(min(bb))
-        if min_dim < 1.2:
-            warnings.append(
+        whole_part_thin = min_dim < MIN_WALL_MM
+        if whole_part_thin:
+            issues.append(_issue(
+                BLOCKING if min_dim < MIN_PRINTABLE_MM else ADVISORY,
                 f"Very thin geometry: smallest dimension is {min_dim:.1f}mm. "
-                f"Minimum recommended for printing: 1.2mm."
-            )
+                f"Minimum recommended for printing: {MIN_WALL_MM}mm.",
+            ))
 
-        # Wall thickness estimate for watertight meshes using surface-to-volume ratio
-        # For thin shells: avg_wall ~ 2 * volume / surface_area
-        if tm.is_watertight and tm.area > 0 and tm.volume > 0:
-            estimated_wall = 2.0 * tm.volume / tm.area
-            if estimated_wall < 1.2:
-                warnings.append(
-                    f"Thin walls detected (estimated avg: {estimated_wall:.1f}mm). "
-                    f"Minimum recommended: 1.2mm."
-                )
+        # Local wall thickness (ray cast against the BRep). Skipped when the
+        # whole part is already reported as thin: it would say the same.
+        if shape is not None:
+            thin, report["min_wall_mm"] = _thin_wall_issue(shape, tm, deadline)
+            if thin and not whole_part_thin:
+                issues.append(thin)
 
     except Exception as e:
         logger.warning("Mesh validation failed: %s", e)
 
-    return warnings
+    return issues, report
+
+
+def validate_mesh(stl_bytes: bytes, shape: Optional["cq.Shape"] = None) -> list[str]:
+    """Printability warnings (messages only) for an STL. Pass the BRep `shape`
+    to include the ray-cast wall thickness check."""
+    try:
+        tm = load_mesh(stl_bytes)
+    except Exception as e:
+        logger.warning("Mesh validation failed: %s", e)
+        return []
+    issues, _ = inspect_mesh(tm, shape)
+    return [i["message"] for i in issues]
+
+
+# --- BRep inspection (geometry report for the model) ---
+
+# Cap on the per-solid list in the report (an array of 200 pins stays short).
+MAX_REPORTED_SOLIDS = 16
+# BRepCheck (shape.isValid()) cannot be interrupted, so it only starts on
+# shapes small enough to finish in well under the time left after the
+# analysis deadline (40% of EXEC_TIMEOUT): at most this many faces, and no
+# face with more wires than this (it compares every pair of wires on a face;
+# a plate with 400 holes took 5 s).
+VALIDITY_MAX_FACES = 300
+VALIDITY_MAX_WIRES_PER_FACE = 64
+
+
+def _axis_name(d) -> str:
+    for name, axis in (("X", (1, 0, 0)), ("Y", (0, 1, 0)), ("Z", (0, 0, 1))):
+        if abs(float(np.dot(d, axis))) > 0.999:
+            return name
+    return "oblique"
+
+
+class AnalysisTimeout(Exception):
+    """An optional analysis ran past its share of the render deadline."""
+
+
+def _check_deadline(deadline: float) -> None:
+    if time.monotonic() > deadline:
+        raise AnalysisTimeout()
+
+
+def _cylindrical_holes(solid: "cq.Solid", deadline: float = math.inf) -> list[dict]:
+    """Holes in one solid: concave cylindrical faces (material outside the
+    radius) grouped by axis line. Coaxial faces whose axial ranges touch are
+    one hole (a counterbore and its bore, a bore split into two half faces);
+    a group is a hole only when its faces close the full circle at some
+    radius, so concave fillets and slot ends are not counted. The diameter is
+    the smallest full circle, the depth the axial extent, and the hole is
+    through when the axis just past both ends is outside the material.
+    Raises AnalysisTimeout past `deadline` (time.monotonic())."""
+    from OCP.BRepAdaptor import BRepAdaptor_Surface
+    from OCP.BRepClass3d import BRepClass3d_SolidClassifier
+    from OCP.BRepGProp import BRepGProp_Face
+    from OCP.BRepTools import BRepTools
+    from OCP.TopAbs import TopAbs_OUT
+    from OCP.gp import gp_Pnt, gp_Vec
+
+    # Concave cylinder faces bucketed by axis line (rounded direction + foot).
+    lines: dict = {}
+    for f in solid.Faces():
+        if f.geomType() != "CYLINDER":
+            continue
+        _check_deadline(deadline)
+        cyl = BRepAdaptor_Surface(f.wrapped).Cylinder()
+        ax = cyl.Axis()
+        own = np.array([ax.Direction().X(), ax.Direction().Y(), ax.Direction().Z()])
+        # Canonical direction so opposite-facing axes of one line compare equal.
+        d = -own if own[np.argmax(np.abs(own) > 1e-9)] < 0 else own
+        loc = np.array([ax.Location().X(), ax.Location().Y(), ax.Location().Z()])
+        u0, u1, v0, v1 = BRepTools.UVBounds_s(f.wrapped)
+        pnt, nrm = gp_Pnt(), gp_Vec()
+        BRepGProp_Face(f.wrapped).Normal((u0 + u1) / 2, (v0 + v1) / 2, pnt, nrm)
+        p = np.array([pnt.X(), pnt.Y(), pnt.Z()])
+        radial = (p - loc) - np.dot(p - loc, d) * d
+        if np.dot(radial, [nrm.X(), nrm.Y(), nrm.Z()]) >= 0:
+            continue  # convex: a boss or a rounded outside edge
+        # Axial range in a frame shared by every face on this axis line: v
+        # runs along the cylinder's own axis from its location.
+        foot = loc - np.dot(loc, d) * d
+        sign = 1.0 if np.dot(d, own) > 0 else -1.0
+        base = float(np.dot(loc, d))
+        t0, t1 = sorted((base + sign * v0, base + sign * v1))
+        key = tuple(np.round(d, 3)) + tuple(np.round(foot, 2))
+        line = lines.setdefault(key, {"dir": d, "foot": foot, "faces": []})
+        line["faces"].append({"r": cyl.Radius(), "span": u1 - u0, "t0": t0, "t1": t1})
+
+    classifier = BRepClass3d_SolidClassifier(solid.wrapped)
+
+    def outside(q) -> bool:
+        classifier.Perform(gp_Pnt(*q), 1e-6)
+        return classifier.State() == TopAbs_OUT
+
+    holes = []
+    for line in lines.values():
+        d, foot = line["dir"], line["foot"]
+        # Faces whose axial ranges touch form one group (sweep in axial order).
+        groups: list = []
+        for f in sorted(line["faces"], key=lambda f: f["t0"]):
+            if groups and f["t0"] <= groups[-1]["t1"] + 1e-2:
+                groups[-1]["t1"] = max(groups[-1]["t1"], f["t1"])
+                groups[-1]["faces"].append(f)
+            else:
+                groups.append({"t0": f["t0"], "t1": f["t1"], "faces": [f]})
+        for g in groups:
+            _check_deadline(deadline)
+            spans: dict = {}
+            for f in g["faces"]:
+                spans[round(f["r"], 3)] = spans.get(round(f["r"], 3), 0.0) + f["span"]
+            full = [r for r, s in spans.items() if s >= 2 * math.pi - 1e-3]
+            if not full:
+                continue
+            tip = 1.05 * min(full) + 0.1
+            holes.append({
+                "diameter": round(2 * min(full), 2),
+                "depth": round(g["t1"] - g["t0"], 2),
+                "axis": _axis_name(d),
+                "through": all(
+                    # Just past the bore, and past where a drill-point cone or
+                    # ball end (at most one radius long) would stop: a blind
+                    # hole's tip is empty but the material beyond it is not.
+                    # Known miss: a through hole whose exit has more of the
+                    # same solid within ~1 radius (e.g. one arm of a narrow
+                    # U-channel) reads as blind.
+                    outside(foot + d * t)
+                    for t in (g["t0"] - 0.1, g["t0"] - tip, g["t1"] + 0.1, g["t1"] + tip)
+                ),
+            })
+    return holes
+
+
+def _group_holes(holes: list[dict]) -> list[dict]:
+    """Identical holes (diameter, depth, axis, through) as one entry with a count."""
+    groups: "OrderedDict[tuple, dict]" = OrderedDict()
+    for h in holes:
+        key = (h["diameter"], h["depth"], h["axis"], h["through"])
+        if key in groups:
+            groups[key]["count"] += 1
+        else:
+            groups[key] = {**h, "count": 1}
+    return list(groups.values())
+
+
+_FACE_KINDS = {"PLANE": "plane", "CYLINDER": "cylinder", "CONE": "cone", "SPHERE": "sphere", "TORUS": "torus"}
+
+
+def geometry_report(shape: "cq.Shape", is_assembly: bool, deadline: float = math.inf) -> tuple[dict, list[dict]]:
+    """What the model needs to check the result against the request, from the
+    exact BRep: solid count, placement on the bed, BRep validity, a face-type
+    census and the holes. Returns (report, issues). The costly parts (holes,
+    validity) are best-effort: one that raises or runs past `deadline`
+    (time.monotonic()) is left out rather than failing the render."""
+    issues: list[dict] = []
+    solids = shape.Solids()
+    report: dict = {"solid_count": len(solids), "holes": [], "solids": []}
+
+    boxes = [s.BoundingBox() for s in solids]
+    if boxes:
+        combined = boxes[0]
+        for b in boxes[1:]:
+            combined = combined.add(b)
+        report["bounds_min"] = [round(combined.xmin, 2), round(combined.ymin, 2), round(combined.zmin, 2)]
+        report["bounds_max"] = [round(combined.xmax, 2), round(combined.ymax, 2), round(combined.zmax, 2)]
+        z_min = combined.zmin
+        report["z_min"] = round(z_min, 2)
+        report["solids"] = [
+            {
+                "volume": round(s.Volume(), 2),
+                "bbox": {"x": round(b.xlen, 2), "y": round(b.ylen, 2), "z": round(b.zlen, 2)},
+                "z_min": round(b.zmin, 2),
+            }
+            for s, b in list(zip(solids, boxes))[:MAX_REPORTED_SOLIDS]
+        ]
+        if abs(z_min) > BED_TOLERANCE_MM:
+            where = "above" if z_min > 0 else "below"
+            issues.append(_issue(
+                ADVISORY,
+                f"Not on the build plate: the lowest point is at z={z_min:.2f}mm ({where} z=0). "
+                "Slicers drop the part onto the bed, but the print orientation and the viewer "
+                "assume z=0; build it bottom at z=0 (box(..., centered=(True, True, False))).",
+            ))
+        floating = [i for i, b in enumerate(boxes) if b.zmin > z_min + BED_TOLERANCE_MM]
+        if floating:
+            issues.append(_issue(
+                ADVISORY,
+                f"{len(floating)} of {len(solids)} separate solids do not reach the bed "
+                f"(lowest z: {', '.join(f'{boxes[i].zmin:.1f}' for i in floating[:5])}mm) and would "
+                "print in mid-air. Fine for an assembly shown assembled; otherwise lay each part flat at z=0.",
+            ))
+    if len(solids) > 1 and not is_assembly:
+        issues.append(_issue(
+            ADVISORY,
+            f"The result has {len(solids)} separate solids that are not fused. If it is meant to be one "
+            "part, combine the bodies with .union() (they must overlap, not just touch); .add() keeps them "
+            "separate. Use a cq.Assembly for intentionally separate parts.",
+        ))
+
+    faces: dict = {}
+    max_wires = 0
+    for f in shape.Faces():
+        kind = _FACE_KINDS.get(f.geomType(), "freeform")
+        faces[kind] = faces.get(kind, 0) + 1
+        max_wires = max(max_wires, len(f.innerWires()) + 1)
+    report["faces"] = faces
+
+    # None = not measured (timed out or failed), as opposed to 0 holes.
+    report["hole_count"] = None
+    try:
+        holes = [h for s in solids for h in _cylindrical_holes(s, deadline)]
+        report["holes"] = _group_holes(holes)
+        report["hole_count"] = len(holes)
+    except AnalysisTimeout:
+        logger.info("Hole detection skipped: analysis deadline reached")
+    except Exception as e:
+        logger.warning("Hole detection failed: %s", e)
+
+    # Skipped (valid stays None) on large shapes and past the deadline: see
+    # VALIDITY_MAX_FACES.
+    valid = None
+    small = sum(faces.values()) <= VALIDITY_MAX_FACES and max_wires <= VALIDITY_MAX_WIRES_PER_FACE
+    if small and time.monotonic() < deadline:
+        try:
+            valid = bool(shape.isValid())
+        except Exception:
+            valid = None
+    report["valid"] = valid
+    if valid is False:
+        issues.append(_issue(
+            ADVISORY,
+            "BRep check failed (isValid() is False): a boolean or fillet produced self-intersecting "
+            "or degenerate faces. The mesh may still print; check the views, and rebuild that "
+            "feature if it looks wrong.",
+        ))
+
+    return report, issues
 
 
 # Strip internal filesystem paths from error messages before returning them to
@@ -789,8 +1284,13 @@ DEGENERATE_VOLUME_MM3 = 0.001
 # drawn as the viewer's build plate).
 BUILD_VOLUME_MM = 256
 
+# Share of EXEC_TIMEOUT after which _render_pipeline skips the optional
+# analyses (see there). Images are ~0.2-0.6 s, so they still fit after it.
+ANALYSIS_DEADLINE_SHARE = 0.6
 
-def _render_pipeline(code: str) -> dict:
+
+def _render_pipeline(code: str, views: bool = False) -> dict:
+    started = time.monotonic()
     result, console_output = exec_user_code(code)
     try:
         # Normalize once, up front: an unexportable result type (None, a
@@ -810,27 +1310,58 @@ def _render_pipeline(code: str) -> dict:
             )
         stl_data = export_to_bytes(shape, "STL", ".stl")
         stl_base64 = base64.b64encode(stl_data).decode("utf-8")
-        warnings = validate_mesh(stl_data)
+        tm = load_mesh(stl_data)
+        # The optional analyses (wall thickness, holes, validity, images) get
+        # a share of the render deadline and are skipped past it, so a heavy
+        # model that exports in time is never failed by its own report.
+        deadline = started + EXEC_TIMEOUT * ANALYSIS_DEADLINE_SHARE
+        issues, mesh_report = inspect_mesh(tm, shape, deadline)
         if bbox["x"] > BUILD_VOLUME_MM or bbox["y"] > BUILD_VOLUME_MM:
-            warnings.append(
+            issues.append(_issue(
+                BLOCKING,
                 f"Build plate overflow: {bbox['x']:.0f} x {bbox['y']:.0f} mm footprint exceeds "
                 f"the {BUILD_VOLUME_MM} x {BUILD_VOLUME_MM} mm bed on X/Y. "
-                "Scale the design down or split it into printable parts."
-            )
+                "Scale the design down or split it into printable parts.",
+            ))
         if bbox["z"] > BUILD_VOLUME_MM:
-            warnings.append(
+            issues.append(_issue(
+                BLOCKING,
                 f"Build height overflow: {bbox['z']:.0f} mm tall exceeds the "
                 f"{BUILD_VOLUME_MM} mm build height on Z. "
-                "Scale the design down, reorient it, or split it into printable parts."
-            )
+                "Scale the design down, reorient it, or split it into printable parts.",
+            ))
+        # Best-effort: a report or image that fails must not fail a render
+        # that exported fine.
+        geometry = None
+        try:
+            geometry, geometry_issues = geometry_report(shape, isinstance(result, cq.Assembly), deadline)
+            geometry.update(mesh_report)
+            issues.extend(geometry_issues)
+        except Exception as e:
+            logger.warning("Geometry report failed: %s", e)
+        rendered_views = None
+        if views and time.monotonic() < deadline:
+            try:
+                rendered_views = render_views(tm.vertices, tm.faces, tm.face_normals)
+            except Exception as e:
+                logger.warning("View rendering failed: %s", e)
     except Exception as e:
         raise PipelineError(e, console_output) from e
     return {
         "stl_base64": stl_base64,
         "metrics": {"bbox": bbox, "volume": round(volume, 2) if volume is not None else 0.0},
-        "warnings": warnings if warnings else None,
+        "warnings": [i["message"] for i in issues] or None,
+        "issues": issues or None,
+        "geometry": geometry,
+        "views": rendered_views,
         "console_output": console_output if console_output else None,
     }
+
+
+def _render_pipeline_with_views(code: str) -> dict:
+    """_render_pipeline plus the preview images (a module-level function, so
+    it pickles by reference into the render child)."""
+    return _render_pipeline(code, views=True)
 
 
 def _threemf_pipeline(code: str) -> dict:
@@ -845,7 +1376,7 @@ def _threemf_pipeline(code: str) -> dict:
     }
 
 
-# Keep tool errors short: the LLM has a 5-step budget and long errors bury the
+# Keep tool errors short: the LLM has a small step budget and long errors bury the
 # actionable line. OCC/CadQuery messages can run to thousands of characters.
 MAX_ERROR_DETAIL_CHARS = 1500
 
@@ -1034,14 +1565,15 @@ async def render(
 ):
     require_worker_secret(x_worker_secret)
     req_id = http_req.headers.get("x-request-id", "-")
-    cache_key = _cache_key(request.code, "stl")
+    cache_key = _cache_key(request.code, "stl+views" if request.views else "stl")
     cached = _cache_get(cache_key)
     if cached is not None:
         logger.info("[%s] render cache hit", req_id)
         return cached
 
-    logger.info("[%s] render start (code=%d chars)", req_id, len(request.code))
-    payload = await _execute_pipeline(_render_pipeline, request.code, req_id, "render")
+    logger.info("[%s] render start (code=%d chars, views=%s)", req_id, len(request.code), request.views)
+    pipeline = _render_pipeline_with_views if request.views else _render_pipeline
+    payload = await _execute_pipeline(pipeline, request.code, req_id, "render")
     _cache_put(cache_key, payload)
     logger.info("[%s] render ok", req_id)
     return payload
