@@ -1,8 +1,9 @@
 # Pinned by digest so a re-pushed tag cannot change the build (take a new
 # tag's digest from `docker buildx imagetools inspect <image>:<tag>`).
-# continuumio/miniconda3 is deprecated and ends with the 26.7.x line; the next
-# update has to move to anaconda/miniconda.
-FROM continuumio/miniconda3:26.7.1-1@sha256:eca594d684f495c1a02beff33a9fab53aec8c5830eaf431bb149912dc6c9e4c1
+# anaconda/miniconda replaces continuumio/miniconda3, which upstream stopped
+# updating after 26.7.x. Same Debian base; conda lives in /opt/miniconda3
+# instead of /opt/conda.
+FROM anaconda/miniconda:26.9.4@sha256:60deefe8646e7e91d75618e33749153f925538fba1e6160fe033882c973a331b
 
 WORKDIR /app
 
@@ -21,7 +22,7 @@ RUN apt-get update && apt-get install -y \
 # downgraded in place.
 RUN conda create -n cadquery --override-channels -c conda-forge python=3.12 cadquery=2.8.0 -y \
     && conda clean -afy
-ENV PATH=/opt/conda/envs/cadquery/bin:$PATH
+ENV PATH=/opt/miniconda3/envs/cadquery/bin:$PATH
 
 # Install Python dependencies. Pins live in requirements.txt for reproducible
 # builds; copied on its own first so this layer is cached unless deps change.
