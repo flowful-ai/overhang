@@ -38,14 +38,18 @@ export function allowedHosts(env: Record<string, string | undefined> = process.e
   return out;
 }
 
-/** The hostname of a Host header value: port dropped, IPv6 brackets kept, lowercased. */
+/**
+ * The hostname of a Host header value: port dropped, IPv6 brackets kept,
+ * lowercased, and without the trailing dot of a fully qualified name
+ * (`localhost.` is localhost).
+ */
 export function hostnameOf(host: string): string {
   const h = host.trim().toLowerCase();
   if (h.startsWith("[")) {
     const end = h.indexOf("]");
     return end === -1 ? h : h.slice(0, end + 1);
   }
-  return h.replace(/:\d*$/, "");
+  return h.replace(/:\d*$/, "").replace(/\.$/, "");
 }
 
 // Suffixes that public DNS never serves, so an attacker cannot own a name

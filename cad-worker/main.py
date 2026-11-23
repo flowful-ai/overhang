@@ -1458,8 +1458,9 @@ def _kill_group(pid: int) -> None:
     """SIGKILL the process group a render child leads (_child_main's setsid),
     i.e. the processes its script started that are still running: the sandbox
     is not a boundary, so a script can reach os.fork or a shell. The group id
-    stays reserved while any member is alive, so this cannot hit an unrelated
-    process. Not a guarantee: a process that calls setsid itself leaves the
+    stays reserved while any member is alive; once the group is empty, hitting
+    an unrelated one would take the pid being reused by a new group leader
+    within the same instant. Not a guarantee: a process that calls setsid itself leaves the
     group and outlives the render (see SECURITY.md)."""
     try:
         os.killpg(pid, signal.SIGKILL)

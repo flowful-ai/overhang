@@ -110,7 +110,9 @@ export default function ViewerPane({
     } catch (err: unknown) {
       // The server's own message says what to do (fix the script, wait out a
       // busy worker or a rate limit); a generic one hid all three.
-      const detail = err instanceof Error ? err.message : "Please try again.";
+      // Not a proxy's HTML error page, though: that is noise, not a message.
+      const message = err instanceof Error ? err.message.trim() : "";
+      const detail = message && !message.startsWith("<") ? message : "Please try again.";
       toast(`3MF export failed: ${detail}`, "error", { persistent: true });
     }
   };

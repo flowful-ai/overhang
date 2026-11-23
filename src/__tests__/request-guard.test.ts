@@ -21,6 +21,13 @@ describe("hostnameOf / isPrivateName / allowedHosts", () => {
     expect(hostnameOf("[::1]:3000")).toBe("[::1]");
   });
 
+  it("reads a fully qualified name (trailing dot) as the same host", () => {
+    expect(hostnameOf("localhost.:3000")).toBe("localhost");
+    expect(isPrivateName(hostnameOf("nas.local."))).toBe(true);
+    expect(isPrivateName(hostnameOf("evil.example."))).toBe(false);
+    expect(checkRequestOrigin(req({ host: "localhost.:3000", origin: "http://localhost.:3000" }))).toBeNull();
+  });
+
   it.each(["localhost", "app.localhost", "127.0.0.1", "192.168.1.20", "[::1]", "nas", "printer.local", "nas.lan", "cad.internal", "box.home.arpa"])(
     "treats %s as a name public DNS cannot serve",
     (name) => expect(isPrivateName(name)).toBe(true),
