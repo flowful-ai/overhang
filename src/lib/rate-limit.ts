@@ -77,7 +77,7 @@ export function trustsCloudflareHeader(): boolean {
 
 const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
 
-function isIpv4(s: string): boolean {
+export function isIpv4(s: string): boolean {
   const m = IPV4_RE.exec(s);
   return !!m && m.slice(1).every(o => Number(o) <= 255);
 }

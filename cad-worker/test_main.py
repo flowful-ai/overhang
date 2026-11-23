@@ -251,6 +251,69 @@ def test_threaded_native_code_works_under_memory_cap():
     assert r.status_code == 200, r.json()
 
 
+# The sandbox is not a boundary: os is one public attribute away. This script
+# uses that to leave a process behind; `sleep` gets a unique duration so the
+# test can find it. Linux only (needs /proc).
+needs_proc = pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="needs /proc")
+
+
+def _straggler(duration: str, detach: bool) -> str:
+    return (
+        "import cadquery as cq\n"
+        "os = cq.exporters.os\n"
+        "if os.fork() == 0:\n"
+        f"    {'os.setsid()' if detach else 'pass'}\n"
+        f"    os.execv('/bin/sleep', ['sleep', '{duration}'])\n"
+        "result = cq.Workplane('XY').box(1, 1, 1)\n"
+    )
+
+
+def _sleepers(duration: str) -> list[int]:
+    pids = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as f:
+                argv = f.read().split(b"\0")
+            with open(f"/proc/{entry}/stat") as f:
+                state = f.read().rsplit(")", 1)[1].split()[0]
+        except OSError:
+            continue
+        if argv[:2] == [b"sleep", duration.encode()] and state != "Z":
+            pids.append(int(entry))
+    return pids
+
+
+@needs_proc
+def test_processes_a_script_leaves_behind_are_killed_with_the_render():
+    # Before the process-group kill, this sleep outlived the render (the
+    # parent only killed the child itself) and stayed in the container.
+    duration = "86411"
+    r = client.post("/render", json={"code": _straggler(duration, detach=False)})
+    assert r.status_code == 200, r.json()
+    deadline = time.monotonic() + 5
+    while _sleepers(duration) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert _sleepers(duration) == []
+
+
+@needs_proc
+def test_a_process_that_detaches_itself_outlives_the_render():
+    # Documents the limit SECURITY.md states: setsid leaves the render's
+    # process group, so the kill misses it. If this starts failing because the
+    # process is gone, the limit was closed: update SECURITY.md and this test.
+    duration = "86422"
+    try:
+        r = client.post("/render", json={"code": _straggler(duration, detach=True)})
+        assert r.status_code == 200, r.json()
+        time.sleep(0.5)
+        assert len(_sleepers(duration)) == 1
+    finally:
+        for pid in _sleepers(duration):
+            os.kill(pid, 9)
+
+
 # Runs in the render child. numpy can read files, so this is what a curious
 # script would try: its own environment, then the parent's.
 _ENV_PROBE = (
