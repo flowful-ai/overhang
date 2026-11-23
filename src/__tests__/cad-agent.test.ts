@@ -114,7 +114,7 @@ describe("runCadquery tool", () => {
     const onViews = vi.fn();
     const onRender = vi.fn();
     const tool = createRunCadqueryTool({ requestId: "r", worker, onViews, onRender });
-    const out = await tool.execute!({ code: "code" }, { toolCallId: "call-7", messages: [] });
+    const out = await tool.execute!({ code: "code" }, { toolCallId: "call-7", messages: [], context: {} });
     expect(worker.mock.calls[0]).toEqual(["code", "r", expect.objectContaining({ views: true })]);
     expect(onViews).toHaveBeenCalledWith("call-7", response.views);
     expect(JSON.stringify(out)).not.toContain("PNG");
@@ -125,13 +125,13 @@ describe("runCadquery tool", () => {
   it("does not ask for views without onViews", async () => {
     const worker = vi.fn<RenderWorker>(async () => response);
     const tool = createRunCadqueryTool({ requestId: "r", worker });
-    await tool.execute!({ code: "code" }, { toolCallId: "c", messages: [] });
+    await tool.execute!({ code: "code" }, { toolCallId: "c", messages: [], context: {} });
     expect(worker.mock.calls[0][2]).not.toHaveProperty("views");
   });
 
   it("drops the STL and the issue list and geometry report the summary already states from what the model sees", async () => {
     const tool = createRunCadqueryTool({ requestId: "r", worker: async () => response });
-    const out = await tool.execute!({ code: "code" }, { toolCallId: "c", messages: [] });
+    const out = await tool.execute!({ code: "code" }, { toolCallId: "c", messages: [], context: {} });
     const forModel = await tool.toModelOutput!({ toolCallId: "c", input: { code: "code" }, output: out as never });
     const value = (forModel as { value: Record<string, unknown> }).value;
     expect(value).not.toHaveProperty("stlBase64");

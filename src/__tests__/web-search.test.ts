@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
-import type { LanguageModelV3CallOptions, LanguageModelV3StreamPart } from "@ai-sdk/provider";
+import { MockLanguageModelV4, simulateReadableStream } from "ai/test";
+import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { MAX_AGENT_STEPS } from "@/components/chat/constants";
 import { openRouterModel, runAgentTurn, type AgentWorker } from "@/lib/agent-turn";
 import {
@@ -274,7 +274,7 @@ describe("generate-cad web search switches, on the HTTP body", () => {
 });
 
 describe("runAgentTurn web search step options (mock model)", () => {
-  type DoStream = (options: LanguageModelV3CallOptions) => Promise<{ stream: ReadableStream<LanguageModelV3StreamPart> }>;
+  type DoStream = (options: LanguageModelV4CallOptions) => Promise<{ stream: ReadableStream<LanguageModelV4StreamPart> }>;
   const USAGE = {
     inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
     outputTokens: { total: 1, text: 1, reasoning: undefined },
@@ -292,7 +292,7 @@ describe("runAgentTurn web search step options (mock model)", () => {
       }),
     }));
     const turn = await runAgentTurn({
-      model: new MockLanguageModelV3({ modelId: LUNA, doStream }),
+      model: new MockLanguageModelV4({ modelId: LUNA, doStream }),
       prompt: "make a cube",
       worker,
       requestId: "mock",
@@ -307,7 +307,7 @@ describe("runAgentTurn web search step options (mock model)", () => {
 });
 
 describe("per-turn system prompt", () => {
-  type DoStream = (options: LanguageModelV3CallOptions) => Promise<{ stream: ReadableStream<LanguageModelV3StreamPart> }>;
+  type DoStream = (options: LanguageModelV4CallOptions) => Promise<{ stream: ReadableStream<LanguageModelV4StreamPart> }>;
 
   async function systemFor(modelId: string, webSearch: boolean) {
     const doStream = vi.fn<DoStream>(async () => ({
@@ -322,11 +322,11 @@ describe("per-turn system prompt", () => {
               outputTokens: { total: 1, text: 1, reasoning: undefined },
             },
           },
-        ] as LanguageModelV3StreamPart[],
+        ] as LanguageModelV4StreamPart[],
       }),
     }));
     const turn = await runAgentTurn({
-      model: new MockLanguageModelV3({ modelId, doStream }),
+      model: new MockLanguageModelV4({ modelId, doStream }),
       prompt: "make a cube",
       worker,
       requestId: "system",

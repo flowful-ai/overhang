@@ -1,5 +1,5 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-import type { LanguageModelV3 } from "@ai-sdk/provider";
+import type { LanguageModelV4 } from "@ai-sdk/provider";
 import type { ProviderOptions } from "@ai-sdk/provider-utils";
 import {
   convertToModelMessages,
@@ -42,7 +42,7 @@ const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
  * first (allowedModelId), while evals may run candidate models that are not on
  * it yet.
  */
-export function openRouterModel(modelId: string, apiKey: string | undefined): LanguageModelV3 {
+export function openRouterModel(modelId: string, apiKey: string | undefined): LanguageModelV4 {
   if (!apiKey) throw new Error("OPENROUTER_API_KEY is not configured");
   // includeUsage: a streamed response only reports token usage (and
   // OpenRouter's cost) when asked for it; the eval cost cap depends on it.
@@ -142,7 +142,7 @@ function renderViewsMessage(
       role: "user",
       content: [
         { type: "text", text: renderViewsIntro(views) },
-        ...views.map((v) => ({ type: "image" as const, image: v.png_base64, mediaType: "image/png" })),
+        ...views.map((v) => ({ type: "file" as const, data: v.png_base64, mediaType: "image/png" })),
       ],
     };
   }
@@ -162,8 +162,11 @@ type StepOverrides = { toolChoice?: "none"; providerOptions?: ProviderOptions; m
  *   the first script; later steps fix renders and don't pay for a new search.
  *   Merged over the per-model options by the SDK.
  * - After a step that rendered, the preview images of that render (when the
- *   turn collects them), appended for this step only: the next step's
- *   messages come from the SDK again, so each set of images is sent once.
+ *   turn collects them), appended for this step only, so each set of images
+ *   is sent once. AI SDK 7 carries a step's overridden messages into the next
+ *   step, so every step's messages are rebuilt here from the conversation
+ *   itself (the prompt plus what the turn has produced so far), never from
+ *   the previous step's input.
  */
 function agentStepPreparer(
   webSearchOptions: ProviderOptions | undefined,
@@ -173,11 +176,13 @@ function agentStepPreparer(
   return ({
     stepNumber,
     steps,
-    messages,
+    initialMessages,
+    responseMessages,
   }: {
     stepNumber: number;
     steps: ReadonlyArray<StepResult<AgentTools>>;
-    messages: ModelMessage[];
+    initialMessages: ReadonlyArray<ModelMessage>;
+    responseMessages: ReadonlyArray<ModelMessage>;
   }): StepOverrides => {
     const overrides: StepOverrides = {};
     const lastStep = stepNumber >= MAX_AGENT_STEPS - 1;
@@ -188,7 +193,7 @@ function agentStepPreparer(
     const viewsMessage = renderViews ? renderViewsMessage(steps, renderViews) : null;
     if (viewsMessage) extra.push(viewsMessage);
     if (outOfTime && !lastStep) extra.push({ role: "user", content: OUT_OF_TIME_NOTE });
-    if (extra.length > 0) overrides.messages = [...messages, ...extra];
+    overrides.messages = [...initialMessages, ...responseMessages, ...extra];
     return overrides;
   };
 }
@@ -288,7 +293,8 @@ function fillEmptyFinalStep(
   }
   if (chunk.type === "error" && ToolChoiceViolationError.isInstance(chunk.error)) {
     state.refusedToolCall = true;
-    // Dropped here, so streamText's onError never sees it: log it ourselves.
+    // One warning here; onError skips this error so it is not also logged
+    // as a failed turn.
     console.warn(`[${requestId}] model called a tool on a tools-off step; the call was refused`);
     return;
   }
@@ -319,7 +325,7 @@ function logTurnUsage(requestId: string, modelId: string, outcome: string, steps
 
 interface AgentTurnOptions {
   /** Model adapter: openRouterModel in production and live evals, a mock in tests and replay. */
-  model: LanguageModelV3;
+  model: LanguageModelV4;
   /** The conversation so far (model messages), or a single user prompt. */
   prompt: string | ModelMessage[];
   worker: AgentWorker;
@@ -342,7 +348,7 @@ interface AgentTurnOptions {
 }
 
 function startStream(o: {
-  model: LanguageModelV3;
+  model: LanguageModelV4;
   prompt: string | ModelMessage[];
   tools: AgentTools;
   abortSignal: AbortSignal;
@@ -395,6 +401,7 @@ function startStream(o: {
       return new TransformStream(transformer);
     },
     onError: ({ error }) => {
+      if (ToolChoiceViolationError.isInstance(error)) return; // handled by fillEmptyFinalStep
       console.error(`[${o.requestId}] agent turn error:`, error);
     },
     // Usage is logged however the turn ends with completed steps: finished, or

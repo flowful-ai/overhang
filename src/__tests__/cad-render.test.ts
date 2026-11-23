@@ -109,7 +109,7 @@ describe("renderCad", () => {
           throw busy();
         });
         const runCadquery = createRunCadqueryTool({ requestId: "req-9", worker });
-        const pending = runCadquery.execute!({ code: "code" }, { toolCallId: "c1", messages: [] });
+        const pending = runCadquery.execute!({ code: "code" }, { toolCallId: "c1", messages: [], context: {} });
         await vi.runAllTimersAsync();
         expect(await pending).toEqual({ success: false, code: "code", error: WORKER_BUSY_ERROR });
         expect(worker).toHaveBeenCalledTimes(3);

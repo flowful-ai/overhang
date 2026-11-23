@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
-import type { LanguageModelV3CallOptions, LanguageModelV3StreamPart } from "@ai-sdk/provider";
+import { MockLanguageModelV4, simulateReadableStream } from "ai/test";
+import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import type { UIMessage } from "ai";
 import { createGenerateCadPost, MAX_MODEL_INPUT_CHARS, OMITTED_ATTEMPT_TEXT } from "@/app/api/generate-cad/handler";
 import { forNextTurn } from "@/components/chat/next-turn";
@@ -14,7 +14,7 @@ import { SAME_CODE_AS_INPUT } from "@/lib/cad-agent";
 // CAD worker (no module mocks).
 const cadWorkerMock = vi.fn();
 const pingMock = vi.fn();
-let mockModel: MockLanguageModelV3 | null = null;
+let mockModel: MockLanguageModelV4 | null = null;
 const POST = createGenerateCadPost({
   model: () => {
     if (!mockModel) throw new Error("test did not set a mock model");
@@ -41,7 +41,7 @@ const CUBE = "import cadquery as cq\nresult = cq.Workplane().box(20,20,20)";
 const BIG_B64 = "A".repeat(Math.ceil(((2 * 1024 * 1024 + 1024) * 4) / 3));
 const SMALL_JPEG = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2w==";
 
-function textStep(): LanguageModelV3StreamPart[] {
+function textStep(): LanguageModelV4StreamPart[] {
   return [
     { type: "stream-start", warnings: [] },
     { type: "text-start", id: "t" },
@@ -51,7 +51,7 @@ function textStep(): LanguageModelV3StreamPart[] {
   ];
 }
 
-function toolStep(id: string): LanguageModelV3StreamPart[] {
+function toolStep(id: string): LanguageModelV4StreamPart[] {
   const input = JSON.stringify({ code: CUBE });
   return [
     { type: "stream-start", warnings: [] },
@@ -64,13 +64,13 @@ function toolStep(id: string): LanguageModelV3StreamPart[] {
 // which steps were offered tools.
 function alwaysToolCall() {
   let i = 0;
-  return vi.fn(async (_options: LanguageModelV3CallOptions) => ({
+  return vi.fn(async (_options: LanguageModelV4CallOptions) => ({
     stream: simulateReadableStream({ chunks: toolStep(`c${i++}`) }),
   }));
 }
 
 function textOnly() {
-  return vi.fn(async (_options: LanguageModelV3CallOptions) => ({
+  return vi.fn(async (_options: LanguageModelV4CallOptions) => ({
     stream: simulateReadableStream({ chunks: textStep() }),
   }));
 }
@@ -108,7 +108,7 @@ beforeEach(() => {
   });
   pingMock.mockReset();
   pingMock.mockResolvedValue(true);
-  mockModel = new MockLanguageModelV3({ doStream: textOnly() });
+  mockModel = new MockLanguageModelV4({ doStream: textOnly() });
 });
 
 afterEach(() => vi.unstubAllEnvs());
@@ -253,7 +253,7 @@ describe("generate-cad request validation", () => {
 
   it("drops older-turn images (oversized, remote or not) with one placeholder each, instead of rejecting the chat", async () => {
     const doStream = textOnly();
-    mockModel = new MockLanguageModelV3({ doStream });
+    mockModel = new MockLanguageModelV4({ doStream });
     const res = await post({
       messages: [
         user("old full-res snapshot", [
@@ -280,7 +280,7 @@ describe("generate-cad request validation", () => {
 
   it("keeps the images of the newest user message", async () => {
     const doStream = textOnly();
-    mockModel = new MockLanguageModelV3({ doStream });
+    mockModel = new MockLanguageModelV4({ doStream });
     const res = await post({
       messages: [
         user("old snapshot", [{ type: "file", mediaType: "image/png", url: SMALL_JPEG.replace("2w==", "AA==") }]),
@@ -297,7 +297,7 @@ describe("generate-cad request validation", () => {
 
   it("strips the STL from history the client failed to strip, and dedupes the echoed code", async () => {
     const doStream = textOnly();
-    mockModel = new MockLanguageModelV3({ doStream });
+    mockModel = new MockLanguageModelV4({ doStream });
     const edited = CUBE.replace("20)", "40)");
     const toolPart = (id: string, code: string) => ({
       type: "tool-runCadquery",
@@ -325,7 +325,7 @@ describe("generate-cad request validation", () => {
 
   it("rejects a conversation over the model-input cap with 413, without calling the model", async () => {
     const doStream = textOnly();
-    mockModel = new MockLanguageModelV3({ doStream });
+    mockModel = new MockLanguageModelV4({ doStream });
     const res = await post({
       messages: [
         user("cube"),
@@ -340,7 +340,7 @@ describe("generate-cad request validation", () => {
 
   it("trims the oldest render attempts to fit the model-input cap, keeping the basis and the latest turns", async () => {
     const doStream = textOnly();
-    mockModel = new MockLanguageModelV3({ doStream });
+    mockModel = new MockLanguageModelV4({ doStream });
     const BASIS_TURN = 3;
     const attempt = (i: number) => `# attempt ${i}\n${"x".repeat(40_000)}`;
     const messages = Array.from({ length: 10 }, (_, i) => [
@@ -406,7 +406,7 @@ describe("generate-cad request validation", () => {
 
   it("accepts a turn stopped mid tool call and a data part, dropping the incomplete calls before the model", async () => {
     const doStream = textOnly();
-    mockModel = new MockLanguageModelV3({ doStream });
+    mockModel = new MockLanguageModelV4({ doStream });
     const res = await post({
       messages: [
         user("make a cube", [{ type: "data-progress", data: { step: 1 } }]),
@@ -439,7 +439,7 @@ describe("generate-cad request validation", () => {
 describe("generate-cad final step", () => {
   it("offers tools on every step but the last, so the turn ends with text", async () => {
     const doStream = alwaysToolCall();
-    mockModel = new MockLanguageModelV3({ doStream });
+    mockModel = new MockLanguageModelV4({ doStream });
 
     const res = await post({ messages: [user("make a cube")] });
     expect(res.status).toBe(200);
@@ -456,7 +456,7 @@ describe("generate-cad concurrency cap", () => {
   it("returns 503 without calling the model when the generation pool is full", async () => {
     vi.stubEnv("MAX_CONCURRENT_GENERATIONS", "1");
     const doStream = textOnly();
-    mockModel = new MockLanguageModelV3({ doStream });
+    mockModel = new MockLanguageModelV4({ doStream });
     const held = acquirePoolSlot(GENERATION_POOL, 1)!;
     try {
       const res = await post({ messages: [user("cube")] });

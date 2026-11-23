@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
-import type { LanguageModelV3CallOptions, LanguageModelV3StreamPart } from "@ai-sdk/provider";
+import { MockLanguageModelV4, simulateReadableStream } from "ai/test";
+import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { MAX_AGENT_STEPS } from "../src/components/chat/constants";
 import { runAgentTurn, type AgentWorker } from "../src/lib/agent-turn";
 import type { BoundingBox, GeometryReport } from "../src/lib/cad-worker-protocol";
@@ -20,7 +20,7 @@ const NO_TOKENS = {
   outputTokens: { total: undefined, text: undefined, reasoning: undefined },
 };
 
-function streamPartsForStep(step: LlmStepFixture, index: number): LanguageModelV3StreamPart[] {
+function streamPartsForStep(step: LlmStepFixture, index: number): LanguageModelV4StreamPart[] {
   const textId = `text-${index}`;
   return [
     { type: "stream-start", warnings: [] },
@@ -42,7 +42,7 @@ function streamPartsForStep(step: LlmStepFixture, index: number): LanguageModelV
       // Fixtures store the unified reason as a bare string; the V3 part wants
       // the object shape (newer SDK versions only run tools when unified is set).
       finishReason: {
-        unified: step.finishReason as Extract<LanguageModelV3StreamPart, { type: "finish" }>["finishReason"]["unified"],
+        unified: step.finishReason as Extract<LanguageModelV4StreamPart, { type: "finish" }>["finishReason"]["unified"],
         raw: step.finishReason,
       },
       usage: NO_TOKENS,
@@ -64,11 +64,11 @@ function endsOnToolCall(fixture: Fixture): boolean {
   return (fixture.llmSteps.at(-1)?.toolCalls.length ?? 0) > 0;
 }
 
-function mockModelFromFixture(fixture: Fixture, calls: LanguageModelV3CallOptions[]): MockLanguageModelV3 {
+function mockModelFromFixture(fixture: Fixture, calls: LanguageModelV4CallOptions[]): MockLanguageModelV4 {
   let call = 0;
-  return new MockLanguageModelV3({
+  return new MockLanguageModelV4({
     modelId: fixture.model,
-    doStream: async (options: LanguageModelV3CallOptions) => {
+    doStream: async (options: LanguageModelV4CallOptions) => {
       calls.push(options);
       const index = call++;
       const closing = index === fixture.llmSteps.length && endsOnToolCall(fixture);
@@ -113,7 +113,7 @@ describe("eval fixture replay", () => {
         },
       };
 
-      const calls: LanguageModelV3CallOptions[] = [];
+      const calls: LanguageModelV4CallOptions[] = [];
       const onSettled = vi.fn();
       const turn = await runAgentTurn({
         model: mockModelFromFixture(fixture, calls),

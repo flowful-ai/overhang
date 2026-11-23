@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
-import type { LanguageModelV3StreamPart } from "@ai-sdk/provider";
+import { MockLanguageModelV4, simulateReadableStream } from "ai/test";
+import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
 
 // Generation is free (no quota) and anonymous, so the guard left is the shared
 // generation pool: MAX_CONCURRENT_GENERATIONS turns at once across all callers
@@ -30,7 +30,7 @@ function makeRequest(): Request {
   });
 }
 
-const STOP_CHUNKS: LanguageModelV3StreamPart[] = [
+const STOP_CHUNKS: LanguageModelV4StreamPart[] = [
   { type: "stream-start", warnings: [] },
   {
     type: "finish",
@@ -43,7 +43,7 @@ const STOP_CHUNKS: LanguageModelV3StreamPart[] = [
 ];
 
 const stopModel = () =>
-  new MockLanguageModelV3({ doStream: async () => ({ stream: simulateReadableStream({ chunks: STOP_CHUNKS }) }) });
+  new MockLanguageModelV4({ doStream: async () => ({ stream: simulateReadableStream({ chunks: STOP_CHUNKS }) }) });
 
 // Imported per test (vi.resetModules runs before each test).
 async function loadPost(ping: () => Promise<boolean> = async () => true) {

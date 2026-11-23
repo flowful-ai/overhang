@@ -126,7 +126,9 @@ interface CancellableMessage {
 // Mirrors @assistant-ui/core's cancelRun(): it drops an empty optimistic
 // assistant placeholder, and if the thread then ends on the user message (no
 // reply streamed yet) it deletes that message and moves its text into the
-// runtime's own composer, which this app does not render.
+// runtime's own composer, which this app does not render. Since core 0.3 the
+// message is only deleted when that composer is empty, which the app
+// guarantees by resetting it before each cancel (toQueueThread).
 export function stopDropsLastUserMessage(messages: readonly CancellableMessage[]): boolean {
   let end = messages.length;
   const head = messages[end - 1];

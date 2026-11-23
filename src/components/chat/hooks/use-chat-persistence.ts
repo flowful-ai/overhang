@@ -10,6 +10,9 @@ interface UseChatPersistenceArgs {
   runtime: ReturnType<typeof useChatRuntime>;
   messages: readonly ThreadMessage[];
   isRunning: boolean;
+  // The runtime's main thread is still a placeholder (assistant-ui creates it
+  // just after mount). Nothing can be imported into it yet.
+  isLoading: boolean;
   model: string;
   // Receives the restored model: the saved thread's, else the remembered
   // choice (model-preference.ts). Always an id from MODELS.
@@ -31,16 +34,18 @@ export function useChatPersistence({
   runtime,
   messages,
   isRunning,
+  isLoading,
   model,
   setModel,
   onPersistError,
 }: UseChatPersistenceArgs): { clearPersisted: () => void } {
-  // Hydration runs exactly once. Tracked with a ref because the runtime
-  // identity is stable but the effect runs in strict-mode double-invocation
-  // during dev.
+  // Hydration runs exactly once, as soon as the thread exists: importing into
+  // the placeholder thread throws, which used to look like corrupt data and
+  // dropped the saved chat. Tracked with a ref because the runtime identity is
+  // stable but the effect runs in strict-mode double-invocation during dev.
   const hydratedRef = useRef(false);
   useEffect(() => {
-    if (hydratedRef.current) return;
+    if (hydratedRef.current || isLoading) return;
     hydratedRef.current = true;
     setModel(loadModelPreference());
     try {
@@ -58,7 +63,7 @@ export function useChatPersistence({
     } catch {
       // Corrupt data, ignore
     }
-  }, [runtime, setModel]);
+  }, [runtime, setModel, isLoading]);
 
   const onPersistErrorRef = useRef(onPersistError);
   useEffect(() => {
