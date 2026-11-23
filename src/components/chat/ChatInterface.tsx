@@ -34,12 +34,25 @@ import { hasPendingRender } from "./agent-progress";
 // same append as a typed message, so the transport applies the basis, image
 // stripping, model and web search at send time rather than when it was queued.
 function toQueueThread(
-  thread: { cancelRun: () => void; startRun: (config: { parentId: string }) => unknown },
+  thread: {
+    cancelRun: () => void;
+    startRun: (config: { parentId: string }) => unknown;
+    composer: { reset: () => unknown };
+  },
   append: QueueThread["append"],
 ): QueueThread {
   return {
     append,
-    cancelRun: () => thread.cancelRun(),
+    // A Stop before any reply makes the runtime move the user message's text
+    // into its own composer, which this app does not render, and it only
+    // removes the message from the thread when that composer is empty. Left
+    // holding the text of an earlier Stop, it would keep the next stopped
+    // message in the thread while the queue takes it back, and Resume would
+    // send it twice. So the hidden composer is emptied before every cancel.
+    cancelRun: () => {
+      void thread.composer.reset();
+      thread.cancelRun();
+    },
     startRun: (parentId) => {
       void thread.startRun({ parentId });
     },

@@ -236,6 +236,7 @@ describe("runAgentTurn", () => {
     // step. The earlier renders stand, so the user gets the reply a silent
     // last step gets, and the refused call never reaches the worker.
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const render = vi.fn<AgentWorker["render"]>(async () => okRender());
     const worker = fakeWorker({ render });
     const steps = Array.from({ length: MAX_AGENT_STEPS }, (_, i) => toolStep(`c${i}`));
@@ -250,6 +251,9 @@ describe("runAgentTurn", () => {
     // The error part is dropped before the SDK's onError, so the turn logs it.
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("[refused-last-call] model called a tool on a tools-off step"));
     warn.mockRestore();
+    // Logged once, as a warning: not also as a failed turn.
+    expect(error).not.toHaveBeenCalled();
+    error.mockRestore();
     expect(parts).not.toContain("error");
     expect(await stream.text).toBe(EMPTY_REPLY_TEXT.rendered);
     expect(render).toHaveBeenCalledTimes(MAX_AGENT_STEPS - 1);

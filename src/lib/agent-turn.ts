@@ -142,7 +142,7 @@ function renderViewsMessage(
       role: "user",
       content: [
         { type: "text", text: renderViewsIntro(views) },
-        ...views.map((v) => ({ type: "image" as const, image: v.png_base64, mediaType: "image/png" })),
+        ...views.map((v) => ({ type: "file" as const, data: v.png_base64, mediaType: "image/png" })),
       ],
     };
   }
@@ -293,7 +293,8 @@ function fillEmptyFinalStep(
   }
   if (chunk.type === "error" && ToolChoiceViolationError.isInstance(chunk.error)) {
     state.refusedToolCall = true;
-    // Dropped here, so streamText's onError never sees it: log it ourselves.
+    // One warning here; onError skips this error so it is not also logged
+    // as a failed turn.
     console.warn(`[${requestId}] model called a tool on a tools-off step; the call was refused`);
     return;
   }
@@ -400,6 +401,7 @@ function startStream(o: {
       return new TransformStream(transformer);
     },
     onError: ({ error }) => {
+      if (ToolChoiceViolationError.isInstance(error)) return; // handled by fillEmptyFinalStep
       console.error(`[${o.requestId}] agent turn error:`, error);
     },
     // Usage is logged however the turn ends with completed steps: finished, or
