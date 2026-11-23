@@ -1,4 +1,6 @@
-FROM node:24.21.0-alpine3.24 AS base
+# Pinned by digest so a re-pushed tag cannot change the build. To update, take
+# the new tag's digest from `docker buildx imagetools inspect node:<tag>`.
+FROM node:24.21.0-alpine3.24@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS base
 
 # Install dependencies only when needed
 FROM base AS deps

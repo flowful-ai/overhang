@@ -1,4 +1,8 @@
-FROM continuumio/miniconda3:26.7.1-1
+# Pinned by digest so a re-pushed tag cannot change the build (take a new
+# tag's digest from `docker buildx imagetools inspect <image>:<tag>`).
+# continuumio/miniconda3 is deprecated and ends with the 26.7.x line; the next
+# update has to move to anaconda/miniconda.
+FROM continuumio/miniconda3:26.7.1-1@sha256:eca594d684f495c1a02beff33a9fab53aec8c5830eaf431bb149912dc6c9e4c1
 
 WORKDIR /app
 
