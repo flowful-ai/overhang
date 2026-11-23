@@ -40,7 +40,7 @@ The API routes refuse requests that another website makes through your browser. 
 When to set `ALLOWED_HOSTS`:
 
 - You open the app under a public-style hostname, such as `cad.example.com` or a Tailscale `*.ts.net` name. Until that hostname is listed, the API answers `Host "..." is not allowed` and the chat shows that error. This applies behind a reverse proxy too, and when upgrading an install that was already served under such a name.
-- A reverse proxy rewrites `Host` (nginx without `proxy_set_header Host $host`) on plain `http`, and the API answers `Cross-site requests are not accepted`. Add the hostname you type in the browser.
+- A reverse proxy changes `Host` on plain `http` (nginx without `proxy_set_header Host $host`, or with it on a port other than 80, since `$host` drops the port), and the API answers `Cross-site requests are not accepted`. Add the hostname you type in the browser.
 
 `ALLOWED_HOSTS=*` accepts any `Host`. Use it only when something in front of the app already decides which hostnames reach it. The same-origin and `Content-Type` checks stay on.
 

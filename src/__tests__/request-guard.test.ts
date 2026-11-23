@@ -100,7 +100,11 @@ describe("checkRequestOrigin", () => {
     // nginx without `proxy_set_header Host $host`, on plain http so the
     // browser sends no Sec-Fetch-Site.
     const rewritten = { host: "127.0.0.1:3000", origin: "http://nas.lan" };
-    expect(checkRequestOrigin(req(rewritten))?.status).toBe(403);
+    expect(checkRequestOrigin(req(rewritten))).toEqual({
+      status: 403,
+      error:
+        'Cross-site requests are not accepted. If this is Overhang\'s own page behind a proxy, add "nas.lan" to ALLOWED_HOSTS in .env and restart.',
+    });
     vi.stubEnv("ALLOWED_HOSTS", "nas.lan");
     expect(checkRequestOrigin(req(rewritten))).toBeNull();
     vi.stubEnv("ALLOWED_HOSTS", "");
@@ -108,6 +112,13 @@ describe("checkRequestOrigin", () => {
     expect(checkRequestOrigin(req({ ...rewritten, "x-forwarded-host": "nas.lan" }))?.status).toBe(403);
     vi.stubEnv("TRUST_PROXY", "1");
     expect(checkRequestOrigin(req({ ...rewritten, "x-forwarded-host": "nas.lan" }))).toBeNull();
+  });
+
+  it("has the same way out when a proxy forwards Host without its port (nginx $host)", () => {
+    const portDropped = { host: "nas.lan", origin: "http://nas.lan:8080" };
+    expect(checkRequestOrigin(req(portDropped))?.error).toContain('add "nas.lan" to ALLOWED_HOSTS');
+    vi.stubEnv("ALLOWED_HOSTS", "nas.lan");
+    expect(checkRequestOrigin(req(portDropped))).toBeNull();
   });
 
   it.each(["text/plain", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x"])(

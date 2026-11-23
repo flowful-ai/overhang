@@ -71,29 +71,40 @@ function behindTrustedProxy(): boolean {
   return trustedProxyHops() > 0 || trustsCloudflareHeader();
 }
 
-/** Whether the browser (or, failing that, the Origin header) says another site sent `req`. */
-function isCrossSite(req: Request, host: string, allowed: Set<string>): boolean {
+const CROSS_SITE = "Cross-site requests are not accepted.";
+
+/**
+ * Why `req` counts as sent by another site, or null when it does not. The
+ * browser's own verdict (Sec-Fetch-Site) when there is one, else the Origin
+ * header compared with the Host.
+ */
+function crossSiteError(req: Request, host: string, allowed: Set<string>): string | null {
   // Set by the browser, and JavaScript cannot forge it. Only sent to https and
   // loopback URLs, hence the Origin fallback.
   const site = req.headers.get("sec-fetch-site")?.trim().toLowerCase();
-  if (site) return site !== "same-origin" && site !== "none";
+  if (site) return site === "same-origin" || site === "none" ? null : CROSS_SITE;
 
   // No Origin either: not a browser (curl, a script). Browsers send it on
   // every cross-origin POST.
   const origin = req.headers.get("origin");
-  if (origin === null) return false;
+  if (origin === null) return null;
   let url: URL;
   try {
     url = new URL(origin);
   } catch {
-    return true; // "null": a sandboxed frame or a file:// page
+    return CROSS_SITE; // "null": a sandboxed frame or a file:// page
   }
   // A proxy that rewrites Host reports the public name here; believed only
   // when the operator declared a proxy.
   const forwardedHost = behindTrustedProxy()
     ? req.headers.get("x-forwarded-host")?.split(",")[0].trim().toLowerCase()
     : undefined;
-  return url.host !== host && url.host !== forwardedHost && !allowed.has(hostnameOf(url.host));
+  // ALLOWED_HOSTS holds hostnames, so it vouches for every port of one: the
+  // escape hatch for a proxy that rewrites Host or drops its port.
+  if (url.host === host || url.host === forwardedHost || allowed.has(hostnameOf(url.host))) return null;
+  // The app's own page looks like this too when a proxy changes Host on plain
+  // http, so say how to fix that case.
+  return `${CROSS_SITE} If this is Overhang's own page behind a proxy, add "${hostnameOf(url.host).slice(0, 100)}" to ALLOWED_HOSTS in .env and restart.`;
 }
 
 /** Returns why `req` is refused, or null when it may proceed. */
@@ -111,9 +122,8 @@ export function checkRequestOrigin(req: Request): GuardFailure | null {
     };
   }
 
-  if (isCrossSite(req, host, allowed)) {
-    return { status: 403, error: "Cross-site requests are not accepted." };
-  }
+  const crossSite = crossSiteError(req, host, allowed);
+  if (crossSite) return { status: 403, error: crossSite };
 
   const contentType = req.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
   if (contentType !== "application/json") {

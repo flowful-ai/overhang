@@ -92,14 +92,19 @@ services:
         limits:
           memory: 2560M
           cpus: "2.0"
-          pids: 1024
+          pids: 4096
     mem_limit: 2560m
     cpus: 2.0
     # Processes and threads, all renders together. A script that reaches
     # os.fork (the sandbox is not a boundary) cannot fork-bomb the host. OCC
-    # starts a thread per host core in each render, hence the headroom. Same
-    # value as deploy.resources.limits.pids above (Compose rejects a mismatch).
-    pids_limit: 1024
+    # starts a thread per host core in each render, hence the headroom: four
+    # renders on a 256-core host still fit. Same value as
+    # deploy.resources.limits.pids above (Compose rejects a mismatch).
+    pids_limit: 4096
+    # An init process as PID 1 reaps the orphans a script leaves behind.
+    # Without it they stay zombies under uvicorn, each one counted against
+    # pids_limit until the worker can no longer fork.
+    init: true
     healthcheck:
       # env -u: the probe runs as the render children's uid, so with the secret
       # in its environment a render could read it from /proc/<pid>/environ.

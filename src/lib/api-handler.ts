@@ -132,6 +132,13 @@ export function withRoute<T>(config: RouteConfig<T>, handler: Handler<T>) {
     try {
       return await handler(parsed.data, { requestId, signal: req.signal });
     } catch (e: unknown) {
+      // The client went away mid-request (closed the tab during an export):
+      // whatever its abort made the handler throw is not a fault, and nobody
+      // reads the response. 499 keeps it out of the 5xx count.
+      if (req.signal.aborted) {
+        console.info(`[${requestId}] ${config.rateKey} client disconnected`);
+        return new NextResponse(null, { status: 499 });
+      }
       console.error(`[${requestId}] ${config.rateKey} handler error:`, e);
       // An error may declare the status its route should return (see
       // HttpStatusError; cad-worker call failures set it so a user's code
