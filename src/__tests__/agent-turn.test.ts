@@ -231,6 +231,28 @@ describe("runAgentTurn", () => {
     expect(await stream.text).toBe(EMPTY_REPLY_TEXT.other);
   });
 
+  it("ends with the fallback text, not an error, when the model calls the tool on the tools-off last step", async () => {
+    // The SDK refuses a tool call made under toolChoice "none" and fails the
+    // step. The earlier renders stand, so the user gets the reply a silent
+    // last step gets, and the refused call never reaches the worker.
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const render = vi.fn<AgentWorker["render"]>(async () => okRender());
+    const worker = fakeWorker({ render });
+    const steps = Array.from({ length: MAX_AGENT_STEPS }, (_, i) => toolStep(`c${i}`));
+    const stream = await startedTurn({
+      model: new MockLanguageModelV3({ doStream: scripted(steps) }),
+      prompt: "make a cube",
+      worker,
+      requestId: "refused-last-call",
+    });
+    const parts: string[] = [];
+    for await (const part of stream.fullStream) parts.push(part.type);
+    error.mockRestore();
+    expect(parts).not.toContain("error");
+    expect(await stream.text).toBe(EMPTY_REPLY_TEXT.rendered);
+    expect(render).toHaveBeenCalledTimes(MAX_AGENT_STEPS - 1);
+  });
+
   it("adds no fallback to a step that ended in error", async () => {
     const stream = await startedTurn({
       model: new MockLanguageModelV3({ doStream: scripted([emptyStep("error")]) }),

@@ -6,6 +6,7 @@ import {
   safeValidateUIMessages,
   stepCountIs,
   streamText,
+  ToolChoiceViolationError,
   type InferUITools,
   type ModelMessage,
   type StepResult,
@@ -269,17 +270,30 @@ function emptyReplyText(finishReason: string, rendered: boolean): string {
 // turn's own results (steps, onFinish) include it. The text depends on whether
 // an earlier step of the turn rendered. A step that ended in "error" gets
 // none: the error part already reaches the client.
+//
+// One error is not shown as such: a model that calls the tool on a tools-off
+// step (the last one, or out of time). The SDK refuses the call and fails the
+// step (ToolChoiceViolationError); the user asked for nothing wrong and the
+// turn's renders stand, so that step gets the fallback text instead, as it did
+// when the SDK let the turn end on the stray call.
 function fillEmptyFinalStep(
   chunk: TextStreamPart<AgentTools>,
   controller: TransformStreamDefaultController<TextStreamPart<AgentTools>>,
-  state: { hasOutput: boolean; rendered: boolean },
+  state: { hasOutput: boolean; rendered: boolean; refusedToolCall: boolean },
 ) {
-  if (chunk.type === "start-step") state.hasOutput = false;
+  if (chunk.type === "start-step") {
+    state.hasOutput = false;
+    state.refusedToolCall = false;
+  }
+  if (chunk.type === "error" && ToolChoiceViolationError.isInstance(chunk.error)) {
+    state.refusedToolCall = true;
+    return; // logged by onError; replaced by the fallback text below
+  }
   if ((chunk.type === "text-delta" && chunk.text.trim()) || chunk.type === "tool-call") state.hasOutput = true;
   if (chunk.type === "tool-result" && (chunk.output as { success?: unknown } | undefined)?.success === true) {
     state.rendered = true;
   }
-  if (chunk.type === "finish-step" && !state.hasOutput && chunk.finishReason !== "error") {
+  if (chunk.type === "finish-step" && (state.refusedToolCall || (!state.hasOutput && chunk.finishReason !== "error"))) {
     const id = "empty-reply-fallback";
     controller.enqueue({ type: "text-start", id });
     controller.enqueue({ type: "text-delta", id, text: emptyReplyText(chunk.finishReason, state.rendered) });
@@ -361,7 +375,7 @@ function startStream(o: {
     // stream that never terminates.
     // It also adds the fallback reply to an empty final step (fillEmptyFinalStep).
     experimental_transform: () => {
-      const state = { hasOutput: false, rendered: false };
+      const state = { hasOutput: false, rendered: false, refusedToolCall: false };
       // `cancel` is part of the Streams standard and implemented by Node, but
       // TypeScript's DOM lib does not declare it on Transformer yet.
       const transformer: Transformer<TextStreamPart<AgentTools>, TextStreamPart<AgentTools>> & {

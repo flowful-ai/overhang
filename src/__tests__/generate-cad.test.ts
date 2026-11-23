@@ -3,6 +3,7 @@ import { APICallError } from "ai";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import type { LanguageModelV3StreamPart } from "@ai-sdk/provider";
 import { createGenerateCadPost } from "@/app/api/generate-cad/handler";
+import { MAX_AGENT_STEPS } from "@/components/chat/constants";
 import { AGENT_TURN_TIMEOUT_MS, openRouterModel } from "@/lib/agent-turn";
 
 // The real handler, driven through injected adapters: a mock model and a fake
@@ -250,6 +251,24 @@ describe("generate-cad route — agentic tool loop", () => {
 
     expect(cadWorkerMock).toHaveBeenCalledTimes(2);
   });
+  it("streams the fallback reply, not an error, when the model calls the tool on the tools-off last step", async () => {
+    cadWorkerMock.mockResolvedValue({
+      stl_base64: "STL",
+      metrics: { bbox: { x: 1, y: 1, z: 1 }, volume: 1 },
+      warnings: null,
+      console_output: null,
+    });
+    // One tool call per step, including the last one, where tools are off.
+    const steps = Array.from({ length: MAX_AGENT_STEPS }, (_, i) => ({ toolCallId: `c${i}`, code: `result = ${i}` }));
+    mockModel = new MockLanguageModelV3({ doStream: scriptedDoStream(steps) });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const text = await readSseStream(await POST(makeRequest()));
+    error.mockRestore();
+    expect(text).not.toContain('"type":"error"');
+    expect(text).toContain("Design updated. The model ended the turn without describing the changes.");
+    expect(cadWorkerMock).toHaveBeenCalledTimes(MAX_AGENT_STEPS - 1);
+  });
+
   it("returns {error} JSON and frees the slot when the model cannot be built (no API key)", async () => {
     // Sized through the pre-rename ANON_* name: the fallback must still cap the pool.
     vi.stubEnv("MAX_CONCURRENT_GENERATIONS", "");
