@@ -261,9 +261,9 @@ describe("generate-cad route — agentic tool loop", () => {
     // One tool call per step, including the last one, where tools are off.
     const steps = Array.from({ length: MAX_AGENT_STEPS }, (_, i) => ({ toolCallId: `c${i}`, code: `result = ${i}` }));
     mockModel = new MockLanguageModelV3({ doStream: scriptedDoStream(steps) });
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const text = await readSseStream(await POST(makeRequest()));
-    error.mockRestore();
+    warn.mockRestore();
     expect(text).not.toContain('"type":"error"');
     expect(text).toContain("Design updated. The model ended the turn without describing the changes.");
     expect(cadWorkerMock).toHaveBeenCalledTimes(MAX_AGENT_STEPS - 1);

@@ -235,7 +235,7 @@ describe("runAgentTurn", () => {
     // The SDK refuses a tool call made under toolChoice "none" and fails the
     // step. The earlier renders stand, so the user gets the reply a silent
     // last step gets, and the refused call never reaches the worker.
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const render = vi.fn<AgentWorker["render"]>(async () => okRender());
     const worker = fakeWorker({ render });
     const steps = Array.from({ length: MAX_AGENT_STEPS }, (_, i) => toolStep(`c${i}`));
@@ -247,10 +247,33 @@ describe("runAgentTurn", () => {
     });
     const parts: string[] = [];
     for await (const part of stream.fullStream) parts.push(part.type);
-    error.mockRestore();
+    // The error part is dropped before the SDK's onError, so the turn logs it.
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("[refused-last-call] model called a tool on a tools-off step"));
+    warn.mockRestore();
     expect(parts).not.toContain("error");
     expect(await stream.text).toBe(EMPTY_REPLY_TEXT.rendered);
     expect(render).toHaveBeenCalledTimes(MAX_AGENT_STEPS - 1);
+  });
+
+  it("keeps the model's own reply, without the fallback, when it also calls the tool on the last step", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const textAndCall: LanguageModelV3StreamPart[] = [
+      { type: "stream-start", warnings: [] },
+      { type: "text-start", id: "t" },
+      { type: "text-delta", id: "t", delta: "Here is your cube." },
+      { type: "text-end", id: "t" },
+      { type: "tool-call", toolCallId: "last", toolName: "runCadquery", input: JSON.stringify({ code: CUBE }) },
+      { type: "finish", finishReason: { unified: "tool-calls", raw: undefined }, usage: USAGE },
+    ];
+    const steps = [...Array.from({ length: MAX_AGENT_STEPS - 1 }, (_, i) => toolStep(`c${i}`)), textAndCall];
+    const stream = await startedTurn({
+      model: new MockLanguageModelV3({ doStream: scripted(steps) }),
+      prompt: "make a cube",
+      worker: fakeWorker(),
+      requestId: "text-and-refused-call",
+    });
+    expect(await stream.text).toBe("Here is your cube.");
+    warn.mockRestore();
   });
 
   it("adds no fallback to a step that ended in error", async () => {

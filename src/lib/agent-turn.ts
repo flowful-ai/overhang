@@ -280,6 +280,7 @@ function fillEmptyFinalStep(
   chunk: TextStreamPart<AgentTools>,
   controller: TransformStreamDefaultController<TextStreamPart<AgentTools>>,
   state: { hasOutput: boolean; rendered: boolean; refusedToolCall: boolean },
+  requestId: string,
 ) {
   if (chunk.type === "start-step") {
     state.hasOutput = false;
@@ -287,13 +288,16 @@ function fillEmptyFinalStep(
   }
   if (chunk.type === "error" && ToolChoiceViolationError.isInstance(chunk.error)) {
     state.refusedToolCall = true;
-    return; // logged by onError; replaced by the fallback text below
+    // Dropped here, so streamText's onError never sees it: log it ourselves.
+    console.warn(`[${requestId}] model called a tool on a tools-off step; the call was refused`);
+    return;
   }
   if ((chunk.type === "text-delta" && chunk.text.trim()) || chunk.type === "tool-call") state.hasOutput = true;
   if (chunk.type === "tool-result" && (chunk.output as { success?: unknown } | undefined)?.success === true) {
     state.rendered = true;
   }
-  if (chunk.type === "finish-step" && (state.refusedToolCall || (!state.hasOutput && chunk.finishReason !== "error"))) {
+  // A refused call next to real text needs no fallback: the text is the reply.
+  if (chunk.type === "finish-step" && !state.hasOutput && (state.refusedToolCall || chunk.finishReason !== "error")) {
     const id = "empty-reply-fallback";
     controller.enqueue({ type: "text-start", id });
     controller.enqueue({ type: "text-delta", id, text: emptyReplyText(chunk.finishReason, state.rendered) });
@@ -381,7 +385,7 @@ function startStream(o: {
       const transformer: Transformer<TextStreamPart<AgentTools>, TextStreamPart<AgentTools>> & {
         cancel: (reason: unknown) => void;
       } = {
-        transform: (chunk, controller) => fillEmptyFinalStep(chunk, controller, state),
+        transform: (chunk, controller) => fillEmptyFinalStep(chunk, controller, state, o.requestId),
         flush: () => o.end(),
         cancel: (reason) => {
           console.error(`[${o.requestId}] agent turn stream failed:`, reason);
