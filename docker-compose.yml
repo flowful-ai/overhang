@@ -35,6 +35,10 @@ services:
       - WEB_SEARCH=${WEB_SEARCH:-}
       # Kill switch: 1 makes /api/generate-cad return 503.
       - EMERGENCY_DISABLE_GENERATION=${EMERGENCY_DISABLE_GENERATION:-}
+      # Public hostnames the app is served under (comma-separated); the API
+      # refuses any other. Localhost, IP addresses and private names (.local,
+      # .lan, ...) need no entry. See docs/configuration.md#cross-site-requests.
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-}
     deploy:
       resources:
         limits:
@@ -58,15 +62,19 @@ services:
     depends_on:
       cad-worker:
         condition: service_healthy
+    # app-network carries the published port and the calls to OpenRouter;
+    # worker-network is the only way to the worker.
     networks:
       - app-network
+      - worker-network
 
   cad-worker:
     build:
       context: ./cad-worker
       dockerfile: Dockerfile
     restart: unless-stopped
-    # Port not exposed to host — frontend reaches worker via app-network
+    # No port published to the host: the frontend reaches the worker over
+    # worker-network.
     environment:
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://frontend:3000}
       - EXEC_TIMEOUT=${EXEC_TIMEOUT:-30}
@@ -84,8 +92,14 @@ services:
         limits:
           memory: 2560M
           cpus: "2.0"
+          pids: 1024
     mem_limit: 2560m
     cpus: 2.0
+    # Processes and threads, all renders together. A script that reaches
+    # os.fork (the sandbox is not a boundary) cannot fork-bomb the host. OCC
+    # starts a thread per host core in each render, hence the headroom. Same
+    # value as deploy.resources.limits.pids above (Compose rejects a mismatch).
+    pids_limit: 1024
     healthcheck:
       # env -u: the probe runs as the render children's uid, so with the secret
       # in its environment a render could read it from /proc/<pid>/environ.
@@ -109,8 +123,16 @@ services:
       - /home/appuser/.cache:size=64m,mode=1777
     stop_grace_period: 30s
     networks:
-      - app-network
+      - worker-network
 
 networks:
   app-network:
     driver: bridge
+  # internal: no route out of the host, so generated code cannot call the
+  # internet, the LAN or a cloud metadata endpoint. The worker needs no
+  # outbound access at runtime. A new network name rather than a changed
+  # app-network: Compose does not reliably re-create an existing network when
+  # its options change.
+  worker-network:
+    driver: bridge
+    internal: true

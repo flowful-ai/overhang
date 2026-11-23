@@ -104,11 +104,14 @@ export default function ViewerPane({
       code = result.code;
     }
     try {
-      const data = await postJson<{ threemfBase64: string }>("/api/export-3mf", { code });
+      const data = await postJson<{ threemfBase64: string }>("/api/export-3mf", { code }, "Please try again.");
       const blob = base64ToBlob(data.threemfBase64, "model/3mf");
       triggerBlobDownload(blob, "model.3mf");
-    } catch {
-      toast("3MF export failed. Please try again.", "error", { persistent: true });
+    } catch (err: unknown) {
+      // The server's own message says what to do (fix the script, wait out a
+      // busy worker or a rate limit); a generic one hid all three.
+      const detail = err instanceof Error ? err.message : "Please try again.";
+      toast(`3MF export failed: ${detail}`, "error", { persistent: true });
     }
   };
 

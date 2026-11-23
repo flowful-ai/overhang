@@ -166,6 +166,10 @@ export function callCadWorker(
 /**
  * Export CadQuery code to 3MF. Called on-demand for downloads only.
  */
-export function exportThreeMF(code: string, requestId: string, timeoutMs = 60_000): Promise<WorkerThreeMFResultT> {
-  return callWorker("/export-3mf", code, requestId, WorkerThreeMFResult, { timeoutMs });
+export function exportThreeMF(
+  code: string,
+  requestId: string,
+  options?: Pick<WorkerCallOptions, "signal">,
+): Promise<WorkerThreeMFResultT> {
+  return callWorker("/export-3mf", code, requestId, WorkerThreeMFResult, options);
 }

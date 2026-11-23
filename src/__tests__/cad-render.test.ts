@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
-import { renderCad } from "@/lib/cad-render";
+import { exportCad3mf, renderCad } from "@/lib/cad-render";
 import { createRunCadqueryTool, WORKER_BUSY_ERROR } from "@/lib/cad-agent";
-import type { WorkerRenderResult } from "@/lib/cad-worker-protocol";
+import type { WorkerRenderResult, WorkerThreeMFResult } from "@/lib/cad-worker-protocol";
 
 const okWorker = (over: Partial<WorkerRenderResult> = {}): WorkerRenderResult => ({
   stl_base64: "STL",
@@ -145,5 +145,51 @@ describe("renderCad", () => {
       expect(callWorker).toHaveBeenCalledOnce();
       expect(r).toMatchObject({ success: false, workerStatus: 400 });
     });
+  });
+});
+
+describe("exportCad3mf", () => {
+  const ok: WorkerThreeMFResult = { threemf_base64: "3MF", console_output: null };
+  const busy = () => Object.assign(new Error("CAD Rendering Failed: Worker is busy"), { workerStatus: 503, httpStatus: 503 });
+
+  it("normalizes typographic punctuation like renderCad, so a script that renders also exports", async () => {
+    const callWorker = vi.fn(async (_code: string, _requestId: string) => ok);
+    const code = "label = “M3” # 2–12 mm";
+    const rendered = await renderCad(code, "req-r", { callWorker: vi.fn(async () => okWorker()) });
+    await exportCad3mf(code, "req-e", { callWorker });
+    expect(callWorker.mock.calls[0][0]).toBe('label = "M3" # 2-12 mm');
+    expect(callWorker.mock.calls[0][0]).toBe(rendered.code);
+  });
+
+  it("retries a busy worker and returns the export once it frees up", async () => {
+    const callWorker = vi
+      .fn(async (): Promise<WorkerThreeMFResult> => ok)
+      .mockRejectedValueOnce(busy())
+      .mockRejectedValueOnce(busy());
+    await expect(exportCad3mf("code", "req-e2", { callWorker, busyRetryDelaysMs: [0, 0] })).resolves.toEqual(ok);
+    expect(callWorker).toHaveBeenCalledTimes(3);
+  });
+
+  it("rethrows the worker's error with its status once the retries run out", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const callWorker = vi.fn(async (): Promise<WorkerThreeMFResult> => {
+      throw busy();
+    });
+    await expect(exportCad3mf("code", "req-e3", { callWorker, busyRetryDelaysMs: [0, 0] })).rejects.toMatchObject({
+      message: "CAD Rendering Failed: Worker is busy",
+      httpStatus: 503,
+    });
+    warn.mockRestore();
+    expect(callWorker).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not retry a script error, and hands the abort signal to the worker call", async () => {
+    const signal = new AbortController().signal;
+    const callWorker = vi.fn(async (): Promise<WorkerThreeMFResult> => {
+      throw Object.assign(new Error("CAD Rendering Failed: SyntaxError"), { workerStatus: 400, httpStatus: 400 });
+    });
+    await expect(exportCad3mf("code", "req-e4", { callWorker, signal })).rejects.toMatchObject({ httpStatus: 400 });
+    expect(callWorker).toHaveBeenCalledTimes(1);
+    expect(callWorker).toHaveBeenCalledWith("code", "req-e4", { signal });
   });
 });

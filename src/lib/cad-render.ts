@@ -1,4 +1,4 @@
-import { callCadWorker, type WorkerCallOptions } from "./cad-worker";
+import { callCadWorker, exportThreeMF, type WorkerCallOptions } from "./cad-worker";
 import { normalizePunctuation } from "./llm-code";
 import { toSanitizedMessage } from "./sanitize-error";
 import type {
@@ -7,13 +7,16 @@ import type {
   RenderView,
   WorkerMetrics,
   WorkerRenderResult,
+  WorkerThreeMFResult,
 } from "./cad-worker-protocol";
 
 // The one render pipeline, shared by the agent tool (runCadquery in
 // cad-agent.ts, driven by the agent turn in agent-turn.ts) and the manual re-render route (/api/render-cad): normalize
 // typographic punctuation the model/user may paste (Python's tokenizer rejects
 // em-dashes, smart quotes, etc.), call the CAD worker, and return a structured
-// success/failure result.
+// success/failure result. The 3MF download (exportCad3mf, /api/export-3mf)
+// runs the same script on the worker, so it normalizes and retries a busy
+// worker the same way.
 //
 // Before, each caller went through the worker separately and only the agent
 // path normalized, so the same code string healed via chat but SyntaxError'd on
@@ -73,54 +76,96 @@ function pause(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+/**
+ * Runs one worker call, retrying a 503 after each backoff in `delays`. Any
+ * other failure, and a 503 that outlasts the retries, is rethrown as is.
+ */
+async function withBusyRetry<T>(
+  call: () => Promise<T>,
+  requestId: string,
+  // `busyRetryDelaysMs` overrides the backoff (tests); `signal` ends the waits early.
+  opts?: { busyRetryDelaysMs?: readonly number[]; signal?: AbortSignal },
+): Promise<T> {
+  const delays = opts?.busyRetryDelaysMs ?? BUSY_RETRY_DELAYS_MS;
+  const signal = opts?.signal;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await call();
+    } catch (e: unknown) {
+      // A 503 says nothing about the code: retry it here first, so neither the
+      // model nor the user has to.
+      if ((e as { workerStatus?: unknown })?.workerStatus !== 503) throw e;
+      if (attempt < delays.length && !signal?.aborted) {
+        await pause(delays[attempt], signal);
+        continue;
+      }
+      console.warn(`[${requestId}] cad-worker still busy after ${attempt + 1} attempts`);
+      throw e;
+    }
+  }
+}
+
 export async function renderCad(
   code: string,
   requestId: string,
   // The eval replay path substitutes recorded worker responses; production uses
   // the live worker. `signal` cancels the worker call (and the 503 retries)
   // when the caller gives up. `views` asks the worker for preview images.
-  // `busyRetryDelaysMs` overrides the 503 backoff (tests).
   opts?: { callWorker?: RenderWorker; signal?: AbortSignal; views?: boolean; busyRetryDelaysMs?: readonly number[] },
 ): Promise<CadRenderResult> {
   const callWorker = opts?.callWorker ?? callCadWorker;
-  const delays = opts?.busyRetryDelaysMs ?? BUSY_RETRY_DELAYS_MS;
   const cleaned = normalizePunctuation(code);
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const data = await callWorker(cleaned, requestId, {
-        signal: opts?.signal,
-        ...(opts?.views ? { views: true } : {}),
-      });
-      return {
-        success: true,
-        code: cleaned,
-        stlBase64: data.stl_base64,
-        warnings: data.warnings ?? [],
-        issues: data.issues ?? [],
-        ...(data.geometry ? { geometry: data.geometry } : {}),
-        ...(data.views?.length ? { views: data.views } : {}),
-        metrics: data.metrics,
-      };
-    } catch (e: unknown) {
-      const workerStatus = (e as { workerStatus?: unknown })?.workerStatus;
-      // A 503 says nothing about the code: retry it here first, so neither the
-      // model nor the user has to.
-      if (workerStatus === 503) {
-        if (attempt < delays.length && !opts?.signal?.aborted) {
-          await pause(delays[attempt], opts?.signal);
-          continue;
-        }
-        console.warn(`[${requestId}] cad-worker still busy after ${attempt + 1} attempts`);
-      }
-      if (process.env.NODE_ENV === "development") {
-        console.error(`[${requestId}] cad-worker failed:`, cleaned.slice(0, 500));
-      }
-      return {
-        success: false,
-        code: cleaned,
-        error: toSanitizedMessage(e),
-        ...(typeof workerStatus === "number" ? { workerStatus } : {}),
-      };
+  try {
+    const data = await withBusyRetry(
+      () => callWorker(cleaned, requestId, { signal: opts?.signal, ...(opts?.views ? { views: true } : {}) }),
+      requestId,
+      opts,
+    );
+    return {
+      success: true,
+      code: cleaned,
+      stlBase64: data.stl_base64,
+      warnings: data.warnings ?? [],
+      issues: data.issues ?? [],
+      ...(data.geometry ? { geometry: data.geometry } : {}),
+      ...(data.views?.length ? { views: data.views } : {}),
+      metrics: data.metrics,
+    };
+  } catch (e: unknown) {
+    const workerStatus = (e as { workerStatus?: unknown })?.workerStatus;
+    if (process.env.NODE_ENV === "development") {
+      console.error(`[${requestId}] cad-worker failed:`, cleaned.slice(0, 500));
     }
+    return {
+      success: false,
+      code: cleaned,
+      error: toSanitizedMessage(e),
+      ...(typeof workerStatus === "number" ? { workerStatus } : {}),
+    };
   }
+}
+
+/** The worker call exportCad3mf drives: the live worker by default, a fake in tests. */
+export type ThreeMFWorker = (
+  code: string,
+  requestId: string,
+  options?: Pick<WorkerCallOptions, "signal">,
+) => Promise<WorkerThreeMFResult>;
+
+/**
+ * Export CadQuery code to 3MF, with renderCad's normalization and busy
+ * retries: a script that renders must export too. Before, this path called
+ * the worker raw, so a script with a pasted smart quote rendered and then
+ * failed to export with a SyntaxError, and one busy moment failed the
+ * download. Throws the worker's error (it carries the HTTP status for the
+ * route, see WorkerCallError).
+ */
+export function exportCad3mf(
+  code: string,
+  requestId: string,
+  opts?: { callWorker?: ThreeMFWorker; signal?: AbortSignal; busyRetryDelaysMs?: readonly number[] },
+): Promise<WorkerThreeMFResult> {
+  const callWorker = opts?.callWorker ?? exportThreeMF;
+  const cleaned = normalizePunctuation(code);
+  return withBusyRetry(() => callWorker(cleaned, requestId, { signal: opts?.signal }), requestId, opts);
 }

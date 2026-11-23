@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { ZodType } from "zod";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { checkRequestOrigin } from "@/lib/request-guard";
 import type { HttpStatusError } from "@/lib/http-error";
 import { toSanitizedMessage } from "@/lib/sanitize-error";
 import { generateRequestId } from "@/lib/utils";
@@ -68,9 +69,9 @@ export async function readBodyCapped(req: Request, cap: number): Promise<string 
 }
 
 /**
- * Wraps a Next.js POST handler with: kill switch + rate-limit + body cap +
- * JSON parse + Zod validation + uniform error shape + request ID
- * logging.
+ * Wraps a Next.js POST handler with: kill switch + cross-site guard +
+ * rate-limit + body cap + JSON parse + Zod validation + uniform error shape +
+ * request ID logging.
  *
  * The handler may return any `Response` — including a streaming response
  * (e.g. `streamText(...).toUIMessageStreamResponse(...)`); the wrapper passes
@@ -88,6 +89,14 @@ export function withRoute<T>(config: RouteConfig<T>, handler: Handler<T>) {
         { error: "This endpoint is temporarily disabled. Please try again later." },
         { status: 503 },
       );
+    }
+
+    // Before the rate limit: a page hammering the API from the operator's own
+    // browser must not use up the bucket the real client shares.
+    const refused = checkRequestOrigin(req);
+    if (refused) {
+      console.warn(`[${requestId}] ${config.rateKey} refused (${refused.status}): ${refused.error}`);
+      return NextResponse.json({ error: refused.error }, { status: refused.status });
     }
 
     const ip = getClientIp(req);

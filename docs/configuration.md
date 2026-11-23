@@ -16,6 +16,7 @@ Overhang reads its settings from `.env`, which `setup.sh` creates from `.env.exa
 | `TRUST_PROXY` | No | `0` (`.env.example`), `1` (Compose without a `.env` value) | Number of trusted proxies that append to `X-Forwarded-For`. See [Running behind a proxy](#running-behind-a-proxy). |
 | `TRUST_CF_CONNECTING_IP` | No | unset | `1` keys the rate limiter on `CF-Connecting-IP`. See [Cloudflare](#cloudflare). |
 | `FRONTEND_BIND` | No | `127.0.0.1` | Host interface Compose publishes port 3000 on. Keeps other machines off port 3000; it does not firewall your proxy. |
+| `ALLOWED_HOSTS` | No | unset | Comma-separated public hostnames the app is served under, for example `cad.example.com`. See [Cross-site requests](#cross-site-requests). |
 | `MAX_CONCURRENT_GENERATIONS` | No | `4` | Max simultaneous `/api/generate-cad` turns, shared by all callers. Over it: 503. Falls back to the older `ANON_MAX_CONCURRENT_GENERATIONS`. |
 | `MAX_CONCURRENT_RENDERS` | No | `4` | Same, for `/api/render-cad` and `/api/export-3mf` (one shared pool). Falls back to `ANON_MAX_CONCURRENT_RENDERS`. |
 | `EMERGENCY_DISABLE_GENERATION` | No | unset | `1` forces `/api/generate-cad` to return 503. Kill switch for cost incidents. |
@@ -28,12 +29,28 @@ The agent can look up product specs through OpenRouter web search, on the first 
 
 Only unset, empty, `on`, `1` or `true` enable it. Any other value, such as `off`, disables it for everyone and greys out the toggle in Settings. Users can also turn it off in Settings.
 
+## Cross-site requests
+
+The API routes refuse requests that another website makes through your browser. Without that, any page you visit could call `http://localhost:3000/api/render-cad` and run code in the worker, or spend your OpenRouter credits. A request is accepted when all three hold:
+
+- The browser marks it same-origin: `Sec-Fetch-Site: same-origin`, or, where the browser does not send that header (plain `http` on anything but localhost), an `Origin` that matches the `Host`. Clients that send neither, such as `curl`, pass this check.
+- Its `Content-Type` is `application/json`.
+- Its `Host` is one of: `localhost`, an IP address, a single-label name (`nas`), a name under `.local`, `.lan`, `.internal`, `.home.arpa` or `.localhost`, or an entry in `ALLOWED_HOSTS`. This stops DNS rebinding, where a public name is re-pointed at your machine.
+
+When to set `ALLOWED_HOSTS`:
+
+- You open the app under a public-style hostname, such as `cad.example.com` or a Tailscale `*.ts.net` name. Until that hostname is listed, the API answers `Host "..." is not allowed` and the chat shows that error. This applies behind a reverse proxy too, and when upgrading an install that was already served under such a name.
+- A reverse proxy rewrites `Host` (nginx without `proxy_set_header Host $host`) on plain `http`, and the API answers `Cross-site requests are not accepted`. Add the hostname you type in the browser.
+
+`ALLOWED_HOSTS=*` accepts any `Host`. Use it only when something in front of the app already decides which hostnames reach it. The same-origin and `Content-Type` checks stay on.
+
 ## Running behind a proxy
 
 A local install needs none of this. If you serve Overhang from a server or behind a reverse proxy:
 
 - **Access.** There are no accounts, so anyone who reaches the app spends your OpenRouter credits. Put access control (proxy auth, VPN) in front of it unless it is meant to be open.
 - **Port bind.** Compose publishes port 3000 on `FRONTEND_BIND` (default `127.0.0.1`). A proxy on the same host reaches it there or over the Docker network. Set `FRONTEND_BIND=0.0.0.0` only if the proxy runs on another machine, and firewall port 3000 to that proxy.
+- **Hostname.** Set `ALLOWED_HOSTS` to the hostname the proxy serves the app under. See [Cross-site requests](#cross-site-requests).
 - **Client IP.** Set `TRUST_PROXY` to the number of trusted proxies that append to `X-Forwarded-For`: `1` behind one reverse proxy (nginx, Caddy, Traefik), `2` behind a CDN plus a reverse proxy. The rate limiter keys on the entry that many hops from the right. Firewall the origin so clients can only reach it through those proxies, otherwise they can forge the header and get a fresh rate-limit bucket on every request. With `TRUST_PROXY=0` all callers share one bucket, and the app logs a warning at boot.
 - **Monitoring.** `GET /api/health` checks the app; `GET /api/health?deep=1` also pings the CAD worker. Both return 503 when a check fails.
 
