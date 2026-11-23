@@ -1,11 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback, useMemo, useSyncExternalStore, type MutableRefObject } from "react";
-import {
-  AssistantRuntimeProvider,
-  useThread,
-  useThreadRuntime,
-} from "@assistant-ui/react";
+import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { useChatRuntime } from "@assistant-ui/react-ai-sdk";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { KeyRound, RotateCcw } from "lucide-react";
@@ -134,8 +130,8 @@ function ChatInterfaceInner({
   runtime: ReturnType<typeof useChatRuntime>;
   workingCodeRef: MutableRefObject<string>;
 }) {
-  const thread = useThread();
-  const threadRuntime = useThreadRuntime();
+  const threadRuntime = runtime.thread;
+  const thread = useSyncExternalStore(threadRuntime.subscribe, threadRuntime.getState, threadRuntime.getState);
   const messages = thread.messages;
   const isRunning = thread.isRunning;
 
@@ -173,6 +169,7 @@ function ChatInterfaceInner({
     runtime,
     messages,
     isRunning,
+    isLoading: thread.isLoading,
     model,
     setModel: setModelSafe,
     onPersistError: toastPersistent,

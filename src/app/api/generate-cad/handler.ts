@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { APICallError, createUIMessageStreamResponse, type ModelMessage, type UIMessageChunk } from "ai";
-import type { LanguageModelV3 } from "@ai-sdk/provider";
+import type { LanguageModelV4 } from "@ai-sdk/provider";
 import { z } from "zod";
 import { APP_CONSTANTS } from "@/lib/utils";
 import { OMITTED_SNAPSHOT_TEXT } from "@/lib/constants";
@@ -238,7 +238,7 @@ function abortAsError(): TransformStream<UIMessageChunk, UIMessageChunk> {
 
 export interface GenerateCadDeps {
   /** Model adapter for the requested model id (the route applies the allowlist). */
-  model: (requestedModelId: string | undefined) => LanguageModelV3;
+  model: (requestedModelId: string | undefined) => LanguageModelV4;
   worker: AgentWorker;
   /** Server switch for web search (WEB_SEARCH in production). Absent means off. */
   webSearchAvailable?: () => boolean;

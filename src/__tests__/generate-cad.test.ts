@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 import { APICallError } from "ai";
-import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
-import type { LanguageModelV3StreamPart } from "@ai-sdk/provider";
+import { MockLanguageModelV4, simulateReadableStream } from "ai/test";
+import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { createGenerateCadPost } from "@/app/api/generate-cad/handler";
 import { MAX_AGENT_STEPS } from "@/components/chat/constants";
 import { AGENT_TURN_TIMEOUT_MS, openRouterModel } from "@/lib/agent-turn";
@@ -10,7 +10,7 @@ import { AGENT_TURN_TIMEOUT_MS, openRouterModel } from "@/lib/agent-turn";
 // CAD worker (no module mocks).
 const cadWorkerMock = vi.fn();
 const pingMock = vi.fn();
-let mockModel: MockLanguageModelV3 | null = null;
+let mockModel: MockLanguageModelV4 | null = null;
 const worker = {
   render: (code: string, requestId: string) => cadWorkerMock(code, requestId),
   ping: () => pingMock(),
@@ -59,13 +59,13 @@ function scriptedDoStream(steps: ScriptedToolCall[]) {
     const step = steps[i++];
     if (!step) {
       // Loop ran further than scripted — emit an empty stop so the SDK exits.
-      const stopChunks: LanguageModelV3StreamPart[] = [
+      const stopChunks: LanguageModelV4StreamPart[] = [
         { type: "stream-start", warnings: [] },
         { type: "finish", finishReason: { unified: "stop", raw: undefined }, usage: FINISH_USAGE },
       ];
       return { stream: simulateReadableStream({ chunks: stopChunks }) };
     }
-    const chunks: LanguageModelV3StreamPart[] = [
+    const chunks: LanguageModelV4StreamPart[] = [
       { type: "stream-start", warnings: [] },
       { type: "tool-input-start", id: step.toolCallId, toolName: "runCadquery" },
       { type: "tool-input-delta", id: step.toolCallId, delta: JSON.stringify({ code: step.code }) },
@@ -113,7 +113,7 @@ describe("generate-cad route — agentic tool loop", () => {
       metrics: { bbox: { x: 10, y: 10, z: 10 }, volume: 1000 },
     });
 
-    mockModel = new MockLanguageModelV3({
+    mockModel = new MockLanguageModelV4({
       doStream: scriptedDoStream([
         { toolCallId: "call-1", code: "import cadquery as cq\nresult = cq.Workplane().box(10,10,10)" },
       ]),
@@ -136,7 +136,7 @@ describe("generate-cad route — agentic tool loop", () => {
         metrics: { bbox: { x: 5, y: 5, z: 5 }, volume: 125 },
       });
 
-    mockModel = new MockLanguageModelV3({
+    mockModel = new MockLanguageModelV4({
       doStream: scriptedDoStream([
         { toolCallId: "c1", code: "broken = ?" },
         { toolCallId: "c2", code: "import cadquery as cq\nresult = cq.Workplane().box(5,5,5)" },
@@ -152,14 +152,14 @@ describe("generate-cad route — agentic tool loop", () => {
   });
 
   it("rejects empty messages with 400 (zod validation)", async () => {
-    mockModel = new MockLanguageModelV3({ doStream: scriptedDoStream([]) });
+    mockModel = new MockLanguageModelV4({ doStream: scriptedDoStream([]) });
     const res = await POST(makeRequest({ messages: [] }));
     expect(res.status).toBe(400);
     expect(cadWorkerMock).not.toHaveBeenCalled();
   });
 
   it("rejects missing messages with 400", async () => {
-    mockModel = new MockLanguageModelV3({ doStream: scriptedDoStream([]) });
+    mockModel = new MockLanguageModelV4({ doStream: scriptedDoStream([]) });
     const res = await POST(makeRequest({}));
     expect(res.status).toBe(400);
   });
@@ -167,7 +167,7 @@ describe("generate-cad route — agentic tool loop", () => {
   it("returns 503 when EMERGENCY_DISABLE_GENERATION=1 (kill switch)", async () => {
     process.env.EMERGENCY_DISABLE_GENERATION = "1";
     try {
-      mockModel = new MockLanguageModelV3({ doStream: scriptedDoStream([]) });
+      mockModel = new MockLanguageModelV4({ doStream: scriptedDoStream([]) });
       const res = await POST(makeRequest());
       expect(res.status).toBe(503);
       expect(cadWorkerMock).not.toHaveBeenCalled();
@@ -177,7 +177,7 @@ describe("generate-cad route — agentic tool loop", () => {
   });
 
   it("returns 413 when request body exceeds 10MB", async () => {
-    mockModel = new MockLanguageModelV3({ doStream: scriptedDoStream([]) });
+    mockModel = new MockLanguageModelV4({ doStream: scriptedDoStream([]) });
     const req = new Request("http://localhost/api/generate-cad", {
       method: "POST",
       headers: {
@@ -199,7 +199,7 @@ describe("generate-cad route — agentic tool loop", () => {
       metrics: { bbox: { x: 50, y: 30, z: 10 }, volume: 15000 },
     });
 
-    mockModel = new MockLanguageModelV3({
+    mockModel = new MockLanguageModelV4({
       doStream: scriptedDoStream([
         { toolCallId: "call-1", code: "import cadquery as cq\nresult = cq.Workplane().box(50,30,10)" },
       ]),
@@ -218,7 +218,7 @@ describe("generate-cad route — agentic tool loop", () => {
     const doStreamSpy = vi.fn(
       scriptedDoStream([{ toolCallId: "c1", code: "import cadquery as cq\nresult = cq.Workplane().box(1,1,1)" }]),
     );
-    mockModel = new MockLanguageModelV3({ doStream: doStreamSpy });
+    mockModel = new MockLanguageModelV4({ doStream: doStreamSpy });
 
     const res = await POST(makeRequest());
     expect(res.status).toBe(503);
@@ -238,7 +238,7 @@ describe("generate-cad route — agentic tool loop", () => {
       metrics: { bbox: { x: 10, y: 10, z: 10 }, volume: 1000 },
     });
 
-    mockModel = new MockLanguageModelV3({
+    mockModel = new MockLanguageModelV4({
       doStream: scriptedDoStream([
         { toolCallId: "c1", code: "import cadquery as cq\nresult = cq.Workplane().box(10,10,10)" },
         { toolCallId: "c2", code: "import cadquery as cq\nresult = cq.Workplane().box(12,12,12)" },
@@ -260,7 +260,7 @@ describe("generate-cad route — agentic tool loop", () => {
     });
     // One tool call per step, including the last one, where tools are off.
     const steps = Array.from({ length: MAX_AGENT_STEPS }, (_, i) => ({ toolCallId: `c${i}`, code: `result = ${i}` }));
-    mockModel = new MockLanguageModelV3({ doStream: scriptedDoStream(steps) });
+    mockModel = new MockLanguageModelV4({ doStream: scriptedDoStream(steps) });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const text = await readSseStream(await POST(makeRequest()));
     warn.mockRestore();
@@ -280,7 +280,7 @@ describe("generate-cad route — agentic tool loop", () => {
       expect(await res.json()).toEqual({ error: "OPENROUTER_API_KEY is not configured" });
 
       // The only slot was released: the next turn is not refused.
-      mockModel = new MockLanguageModelV3({ doStream: scriptedDoStream([]) });
+      mockModel = new MockLanguageModelV4({ doStream: scriptedDoStream([]) });
       const next = await POST(makeRequest());
       expect(next.status).toBe(200);
       await readSseStream(next);
@@ -293,8 +293,8 @@ describe("generate-cad route — agentic tool loop", () => {
     vi.stubEnv("MAX_CONCURRENT_GENERATIONS", "1");
     try {
       // A model that never finishes, so only the abort can end the turn.
-      mockModel = new MockLanguageModelV3({
-        doStream: async () => ({ stream: new ReadableStream<LanguageModelV3StreamPart>() }),
+      mockModel = new MockLanguageModelV4({
+        doStream: async () => ({ stream: new ReadableStream<LanguageModelV4StreamPart>() }),
       });
       const client = new AbortController();
       const req = new Request("http://localhost/api/generate-cad", {
@@ -309,7 +309,7 @@ describe("generate-cad route — agentic tool loop", () => {
       expect((await POST(makeRequest())).status).toBe(503); // slot held by the hanging turn
 
       client.abort();
-      mockModel = new MockLanguageModelV3({ doStream: scriptedDoStream([]) });
+      mockModel = new MockLanguageModelV4({ doStream: scriptedDoStream([]) });
       const next = await POST(makeRequest());
       expect(next.status).toBe(200);
       await readSseStream(next);
@@ -324,9 +324,9 @@ describe("generate-cad route — agentic tool loop", () => {
     try {
       // A model that never finishes on its own and, like a real provider
       // fetch, fails once its abort signal fires: only the turn timeout ends it.
-      mockModel = new MockLanguageModelV3({
+      mockModel = new MockLanguageModelV4({
         doStream: async ({ abortSignal }) => ({
-          stream: new ReadableStream<LanguageModelV3StreamPart>({
+          stream: new ReadableStream<LanguageModelV4StreamPart>({
             start(controller) {
               controller.enqueue({ type: "stream-start", warnings: [] });
               abortSignal?.addEventListener("abort", () => controller.error(abortSignal.reason), { once: true });
@@ -340,13 +340,13 @@ describe("generate-cad route — agentic tool loop", () => {
       await vi.advanceTimersByTimeAsync(AGENT_TURN_TIMEOUT_MS);
       const text = await body;
 
-      // The SDK ends this stream with an "abort" chunk (a clean finish for the
-      // client); the handler must turn it into an error.
-      expect(text).toContain('"type":"error","errorText":"The operation was aborted due to timeout"');
+      // The client must get an error, not a clean finish ("abort" chunk), in
+      // the wording chat-error.ts recognises as the turn timeout.
+      expect(text).toMatch(/"type":"error","errorText":"[^"]*The operation was aborted due to timeout"/);
       expect(text).not.toContain('"type":"abort"');
 
       vi.useRealTimers();
-      mockModel = new MockLanguageModelV3({ doStream: scriptedDoStream([]) });
+      mockModel = new MockLanguageModelV4({ doStream: scriptedDoStream([]) });
       const next = await POST(makeRequest());
       expect(next.status).toBe(200);
       await readSseStream(next);
@@ -359,7 +359,7 @@ describe("generate-cad route — agentic tool loop", () => {
   it("tags a streamed provider error with its HTTP status", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      mockModel = new MockLanguageModelV3({
+      mockModel = new MockLanguageModelV4({
         doStream: async () => {
           throw new APICallError({
             message: "User not found.",
@@ -382,7 +382,7 @@ describe("generate-cad route — agentic tool loop", () => {
     vi.stubEnv("MAX_CONCURRENT_GENERATIONS", "1");
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      mockModel = new MockLanguageModelV3({
+      mockModel = new MockLanguageModelV4({
         doStream: async () => {
           throw new Error("upstream failed at /opt/conda/lib/python3.11/site.py");
         },
@@ -394,7 +394,7 @@ describe("generate-cad route — agentic tool loop", () => {
       // Logged exactly once for the whole request (by the turn, not again by the handler).
       expect(errorSpy).toHaveBeenCalledOnce();
 
-      mockModel = new MockLanguageModelV3({ doStream: scriptedDoStream([]) });
+      mockModel = new MockLanguageModelV4({ doStream: scriptedDoStream([]) });
       const next = await POST(makeRequest());
       expect(next.status).toBe(200);
       await readSseStream(next);

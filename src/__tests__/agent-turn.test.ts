@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
-import type { LanguageModelV3CallOptions, LanguageModelV3StreamPart } from "@ai-sdk/provider";
+import { MockLanguageModelV4, simulateReadableStream } from "ai/test";
+import type { LanguageModelV4CallOptions, LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { MAX_AGENT_STEPS } from "@/components/chat/constants";
 import {
   AGENT_TURN_TIMEOUT_MS,
@@ -26,9 +26,9 @@ const STL = "STL_PAYLOAD_THAT_MUST_NOT_REACH_THE_MODEL";
 // No timer-based delays, so the timeout test can fake setTimeout.
 const NO_DELAY = { initialDelayInMs: null, chunkDelayInMs: null };
 
-type DoStream = (options: LanguageModelV3CallOptions) => Promise<{ stream: ReadableStream<LanguageModelV3StreamPart> }>;
+type DoStream = (options: LanguageModelV4CallOptions) => Promise<{ stream: ReadableStream<LanguageModelV4StreamPart> }>;
 
-function toolStep(id: string): LanguageModelV3StreamPart[] {
+function toolStep(id: string): LanguageModelV4StreamPart[] {
   return [
     { type: "stream-start", warnings: [] },
     { type: "tool-call", toolCallId: id, toolName: "runCadquery", input: JSON.stringify({ code: CUBE }) },
@@ -37,7 +37,7 @@ function toolStep(id: string): LanguageModelV3StreamPart[] {
 }
 
 /** A step that reasons and then ends with neither text nor a tool call. */
-function emptyStep(reason: "length" | "other" | "content-filter" | "error"): LanguageModelV3StreamPart[] {
+function emptyStep(reason: "length" | "other" | "content-filter" | "error"): LanguageModelV4StreamPart[] {
   return [
     { type: "stream-start", warnings: [] },
     { type: "reasoning-start", id: "r" },
@@ -47,7 +47,7 @@ function emptyStep(reason: "length" | "other" | "content-filter" | "error"): Lan
   ];
 }
 
-function textStep(): LanguageModelV3StreamPart[] {
+function textStep(): LanguageModelV4StreamPart[] {
   return [
     { type: "stream-start", warnings: [] },
     { type: "text-start", id: "t" },
@@ -58,7 +58,7 @@ function textStep(): LanguageModelV3StreamPart[] {
 }
 
 /** Serves the scripted steps in order, then text-only steps. */
-function scripted(steps: LanguageModelV3StreamPart[][]) {
+function scripted(steps: LanguageModelV4StreamPart[][]) {
   let i = 0;
   return vi.fn<DoStream>(async () => ({
     stream: simulateReadableStream({ chunks: steps[i++] ?? textStep(), ...NO_DELAY }),
@@ -119,7 +119,7 @@ describe("runAgentTurn", () => {
         }),
       }));
       const stream = await startedTurn({
-        model: new MockLanguageModelV3({ doStream }),
+        model: new MockLanguageModelV4({ doStream }),
         prompt: "make a cube",
         worker: fakeWorker({ render }),
         requestId: "slow-renders",
@@ -142,7 +142,7 @@ describe("runAgentTurn", () => {
     let i = 0;
     const doStream = vi.fn<DoStream>(async () => ({ stream: simulateReadableStream({ chunks: toolStep(`c${i++}`) }) }));
     const stream = await startedTurn({
-      model: new MockLanguageModelV3({ doStream }),
+      model: new MockLanguageModelV4({ doStream }),
       prompt: "make a cube",
       worker: fakeWorker(),
       requestId: "steps",
@@ -161,7 +161,7 @@ describe("runAgentTurn", () => {
   ])("applies the provider options for %s from the model id", async (modelId, expected) => {
     const doStream = scripted([textStep()]);
     const stream = await startedTurn({
-      model: new MockLanguageModelV3({ modelId, doStream }),
+      model: new MockLanguageModelV4({ modelId, doStream }),
       prompt: "make a cube",
       worker: fakeWorker(),
       requestId: "provider-options",
@@ -179,7 +179,7 @@ describe("runAgentTurn", () => {
   ])("sends temperature to %s only when the model supports it", async (modelId, expected) => {
     const doStream = scripted([textStep()]);
     const stream = await startedTurn({
-      model: new MockLanguageModelV3({ modelId, doStream }),
+      model: new MockLanguageModelV4({ modelId, doStream }),
       prompt: "make a cube",
       worker: fakeWorker(),
       requestId: "temperature",
@@ -194,7 +194,7 @@ describe("runAgentTurn", () => {
     ["other", EMPTY_REPLY_TEXT.other],
   ] as const)("replies with a fallback when the turn ends with finishReason %s and no output", async (reason, text) => {
     const stream = await startedTurn({
-      model: new MockLanguageModelV3({ doStream: scripted([emptyStep(reason)]) }),
+      model: new MockLanguageModelV4({ doStream: scripted([emptyStep(reason)]) }),
       prompt: "make a cube",
       worker: fakeWorker(),
       requestId: "empty",
@@ -210,7 +210,7 @@ describe("runAgentTurn", () => {
 
   it("says the design was updated when an earlier step rendered", async () => {
     const stream = await startedTurn({
-      model: new MockLanguageModelV3({ doStream: scripted([toolStep("c1"), emptyStep("length")]) }),
+      model: new MockLanguageModelV4({ doStream: scripted([toolStep("c1"), emptyStep("length")]) }),
       prompt: "make a cube",
       worker: fakeWorker(),
       requestId: "empty-after-render",
@@ -223,7 +223,7 @@ describe("runAgentTurn", () => {
       throw Object.assign(new Error("CAD Rendering Failed: NameError"), { workerStatus: 400 });
     });
     const stream = await startedTurn({
-      model: new MockLanguageModelV3({ doStream: scripted([toolStep("c1"), emptyStep("other")]) }),
+      model: new MockLanguageModelV4({ doStream: scripted([toolStep("c1"), emptyStep("other")]) }),
       prompt: "make a cube",
       worker: fakeWorker({ render }),
       requestId: "empty-after-failure",
@@ -240,7 +240,7 @@ describe("runAgentTurn", () => {
     const worker = fakeWorker({ render });
     const steps = Array.from({ length: MAX_AGENT_STEPS }, (_, i) => toolStep(`c${i}`));
     const stream = await startedTurn({
-      model: new MockLanguageModelV3({ doStream: scripted(steps) }),
+      model: new MockLanguageModelV4({ doStream: scripted(steps) }),
       prompt: "make a cube",
       worker,
       requestId: "refused-last-call",
@@ -257,7 +257,7 @@ describe("runAgentTurn", () => {
 
   it("keeps the model's own reply, without the fallback, when it also calls the tool on the last step", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const textAndCall: LanguageModelV3StreamPart[] = [
+    const textAndCall: LanguageModelV4StreamPart[] = [
       { type: "stream-start", warnings: [] },
       { type: "text-start", id: "t" },
       { type: "text-delta", id: "t", delta: "Here is your cube." },
@@ -267,7 +267,7 @@ describe("runAgentTurn", () => {
     ];
     const steps = [...Array.from({ length: MAX_AGENT_STEPS - 1 }, (_, i) => toolStep(`c${i}`)), textAndCall];
     const stream = await startedTurn({
-      model: new MockLanguageModelV3({ doStream: scripted(steps) }),
+      model: new MockLanguageModelV4({ doStream: scripted(steps) }),
       prompt: "make a cube",
       worker: fakeWorker(),
       requestId: "text-and-refused-call",
@@ -278,7 +278,7 @@ describe("runAgentTurn", () => {
 
   it("adds no fallback to a step that ended in error", async () => {
     const stream = await startedTurn({
-      model: new MockLanguageModelV3({ doStream: scripted([emptyStep("error")]) }),
+      model: new MockLanguageModelV4({ doStream: scripted([emptyStep("error")]) }),
       prompt: "make a cube",
       worker: fakeWorker(),
       requestId: "empty-error",
@@ -289,7 +289,7 @@ describe("runAgentTurn", () => {
 
   it("adds no fallback when the final step has text", async () => {
     const stream = await startedTurn({
-      model: new MockLanguageModelV3({ doStream: scripted([toolStep("c1"), textStep()]) }),
+      model: new MockLanguageModelV4({ doStream: scripted([toolStep("c1"), textStep()]) }),
       prompt: "make a cube",
       worker: fakeWorker(),
       requestId: "not-empty",
@@ -300,10 +300,10 @@ describe("runAgentTurn", () => {
   it("logs the turn's usage and OpenRouter's reported cost", async () => {
     const info = vi.spyOn(console, "info").mockImplementation(() => {});
     try {
-      const withCost = (step: LanguageModelV3StreamPart[], cost: number) =>
+      const withCost = (step: LanguageModelV4StreamPart[], cost: number) =>
         step.map((p) => (p.type === "finish" ? { ...p, usage: { ...USAGE, raw: { cost } } } : p));
       const stream = await startedTurn({
-        model: new MockLanguageModelV3({ doStream: scripted([withCost(toolStep("c1"), 0.001), withCost(textStep(), 0.002)]) }),
+        model: new MockLanguageModelV4({ doStream: scripted([withCost(toolStep("c1"), 0.001), withCost(textStep(), 0.002)]) }),
         prompt: "make a cube",
         worker: fakeWorker(),
         requestId: "usage",
@@ -326,7 +326,7 @@ describe("runAgentTurn", () => {
       const { render, started } = hangingRender();
       const controller = new AbortController();
       const stream = await startedTurn({
-        model: new MockLanguageModelV3({ doStream: scripted([toolStep("c1")]) }),
+        model: new MockLanguageModelV4({ doStream: scripted([toolStep("c1")]) }),
         prompt: "make a cube",
         worker: fakeWorker({ render }),
         requestId: "usage-abort",
@@ -348,7 +348,7 @@ describe("runAgentTurn", () => {
   it("streams the STL to the caller but never sends it back to the model", async () => {
     const doStream = scripted([toolStep("c1"), textStep()]);
     const stream = await startedTurn({
-      model: new MockLanguageModelV3({ doStream }),
+      model: new MockLanguageModelV4({ doStream }),
       prompt: "make a cube",
       worker: fakeWorker(),
       requestId: "stl",
@@ -386,7 +386,7 @@ describe("runAgentTurn", () => {
       // render, render again, then text: images after each render step only.
       const doStream = scripted([toolStep("c1"), toolStep("c2"), textStep()]);
       const stream = await startedTurn({
-        model: new MockLanguageModelV3({ modelId: "anthropic/claude-sonnet-5", doStream }),
+        model: new MockLanguageModelV4({ modelId: "anthropic/claude-sonnet-5", doStream }),
         prompt: "make a cube",
         worker: fakeWorker({ render: withViews }),
         requestId: "views",
@@ -413,7 +413,7 @@ describe("runAgentTurn", () => {
       withViews.mockClear();
       const doStream = scripted([toolStep("c1"), textStep()]);
       const stream = await startedTurn({
-        model: new MockLanguageModelV3({ modelId: "deepseek/deepseek-v4-flash", doStream }),
+        model: new MockLanguageModelV4({ modelId: "deepseek/deepseek-v4-flash", doStream }),
         prompt: "make a cube",
         worker: fakeWorker({ render: withViews }),
         requestId: "no-views",
@@ -481,7 +481,7 @@ describe("runAgentTurn", () => {
       });
       const doStream = scripted([toolStep("c1"), textStep()]);
       const stream = await startedTurn({
-        model: new MockLanguageModelV3({ modelId: "anthropic/claude-sonnet-5", doStream }),
+        model: new MockLanguageModelV4({ modelId: "anthropic/claude-sonnet-5", doStream }),
         prompt: "make a cube",
         worker: fakeWorker({ render: failing }),
         requestId: "views-fail",
@@ -496,7 +496,7 @@ describe("runAgentTurn", () => {
     const controller = new AbortController();
     const onSettled = vi.fn();
     const stream = await startedTurn({
-      model: new MockLanguageModelV3({ doStream: scripted([toolStep("c1")]) }),
+      model: new MockLanguageModelV4({ doStream: scripted([toolStep("c1")]) }),
       prompt: "make a cube",
       worker: fakeWorker({ render }),
       requestId: "abort",
@@ -522,7 +522,7 @@ describe("runAgentTurn", () => {
       const { render, started } = hangingRender();
       const onSettled = vi.fn();
       const stream = await startedTurn({
-        model: new MockLanguageModelV3({ doStream: scripted([toolStep("c1")]) }),
+        model: new MockLanguageModelV4({ doStream: scripted([toolStep("c1")]) }),
         prompt: "make a cube",
         worker: fakeWorker({ render }),
         requestId: "timeout",
@@ -550,13 +550,13 @@ describe("runAgentTurn", () => {
     try {
       const { render, started } = hangingRender();
       const onSettled = vi.fn();
-      const stepWithError: LanguageModelV3StreamPart[] = [
+      const stepWithError: LanguageModelV4StreamPart[] = [
         { type: "stream-start", warnings: [] },
         { type: "error", error: new Error("transient provider hiccup") },
         ...toolStep("c1").slice(1),
       ];
       const stream = await startedTurn({
-        model: new MockLanguageModelV3({ doStream: scripted([stepWithError]) }),
+        model: new MockLanguageModelV4({ doStream: scripted([stepWithError]) }),
         prompt: "make a cube",
         worker: fakeWorker({ render }),
         requestId: "timeout-after-error",
@@ -583,7 +583,7 @@ describe("runAgentTurn", () => {
     it("when the turn finishes", async () => {
       const onSettled = vi.fn();
       const stream = await startedTurn({
-        model: new MockLanguageModelV3({ doStream: scripted([toolStep("c1"), textStep()]) }),
+        model: new MockLanguageModelV4({ doStream: scripted([toolStep("c1"), textStep()]) }),
         prompt: "make a cube",
         worker: fakeWorker(),
         requestId: "finish",
@@ -598,9 +598,9 @@ describe("runAgentTurn", () => {
       const controller = new AbortController();
       const onSettled = vi.fn();
       // A model call that never completes on its own.
-      const doStream = vi.fn<DoStream>(async () => ({ stream: new ReadableStream<LanguageModelV3StreamPart>() }));
+      const doStream = vi.fn<DoStream>(async () => ({ stream: new ReadableStream<LanguageModelV4StreamPart>() }));
       await startedTurn({
-        model: new MockLanguageModelV3({ doStream }),
+        model: new MockLanguageModelV4({ doStream }),
         prompt: "make a cube",
         worker: fakeWorker(),
         requestId: "abort-unread",
@@ -623,13 +623,13 @@ describe("runAgentTurn", () => {
       try {
         const onSettled = vi.fn();
         const render = vi.fn<AgentWorker["render"]>(async () => okRender());
-        const stepWithError: LanguageModelV3StreamPart[] = [
+        const stepWithError: LanguageModelV4StreamPart[] = [
           { type: "stream-start", warnings: [] },
           { type: "error", error: new Error("transient provider hiccup") },
           ...toolStep("c1").slice(1),
         ];
         const stream = await startedTurn({
-          model: new MockLanguageModelV3({ doStream: scripted([stepWithError, textStep()]) }),
+          model: new MockLanguageModelV4({ doStream: scripted([stepWithError, textStep()]) }),
           prompt: "make a cube",
           worker: fakeWorker({ render }),
           requestId: "error-part",
@@ -655,7 +655,7 @@ describe("runAgentTurn", () => {
     it("when the model stream errors", async () => {
       const onSettled = vi.fn();
       const stream = await startedTurn({
-        model: new MockLanguageModelV3({
+        model: new MockLanguageModelV4({
           doStream: async () => {
             throw new Error("provider exploded");
           },
@@ -680,7 +680,7 @@ describe("runAgentTurn", () => {
         const onSettled = vi.fn();
         let pulls = 0;
         const doStream = vi.fn<DoStream>(async () => ({
-          stream: new ReadableStream<LanguageModelV3StreamPart>({
+          stream: new ReadableStream<LanguageModelV4StreamPart>({
             pull(controller) {
               if (pulls++ === 0) {
                 controller.enqueue({ type: "stream-start", warnings: [] });
@@ -693,7 +693,7 @@ describe("runAgentTurn", () => {
           }),
         }));
         const stream = await startedTurn({
-          model: new MockLanguageModelV3({ doStream }),
+          model: new MockLanguageModelV4({ doStream }),
           prompt: "make a cube",
           worker: fakeWorker(),
           requestId: "stream-dropped",
@@ -719,7 +719,7 @@ describe("runAgentTurn", () => {
 
     it("when starting the turn throws synchronously, and rethrows", async () => {
       const onSettled = vi.fn();
-      const model = new MockLanguageModelV3({ doStream: scripted([]) });
+      const model = new MockLanguageModelV4({ doStream: scripted([]) });
       Object.defineProperty(model, "modelId", {
         get: () => {
           throw new Error("broken model adapter");
@@ -739,7 +739,7 @@ describe("runAgentTurn", () => {
         },
       });
       await expect(
-        runAgentTurn({ model: new MockLanguageModelV3(), prompt: "x", worker, requestId: "ping-throw", onSettled }),
+        runAgentTurn({ model: new MockLanguageModelV4(), prompt: "x", worker, requestId: "ping-throw", onSettled }),
       ).rejects.toThrow("ping exploded");
       expect(onSettled).toHaveBeenCalledOnce();
     });
@@ -748,7 +748,7 @@ describe("runAgentTurn", () => {
       const onSettled = vi.fn();
       const doStream = scripted([toolStep("c1")]);
       const turn = await runAgentTurn({
-        model: new MockLanguageModelV3({ doStream }),
+        model: new MockLanguageModelV4({ doStream }),
         prompt: "make a cube",
         worker: fakeWorker({ ping: async () => false }),
         requestId: "worker-down",
