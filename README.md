@@ -68,6 +68,7 @@ Start simple and iterate, include dimensions, and mention the material (PLA, PET
 |----------|---------|-------------|
 | `TRUST_PROXY` | `0` | Number of trusted reverse proxies in front of the app. |
 | `FRONTEND_BIND` | `127.0.0.1` | Host interface port 3000 is published on. |
+| `ALLOWED_HOSTS` | unset | Public hostnames the app is served under, required for those. Not needed for localhost, IP addresses or `.local` names. |
 | `WEB_SEARCH` | on | `off` disables agent web search for everyone. |
 | `EMERGENCY_DISABLE_GENERATION` | unset | `1` makes generation return 503. |
 
@@ -75,13 +76,13 @@ All variables are in [docs/configuration.md](docs/configuration.md).
 
 ## Security
 
-There is no sign-in: anyone who can reach the app generates designs on your OpenRouter key. Compose publishes it on loopback by default; add access control before exposing it.
+There is no sign-in: anyone who can reach the app generates designs on your OpenRouter key. Compose publishes it on loopback by default; add access control before exposing it. Requests from other websites are refused, so a page open in your browser cannot drive a local install.
 
-The worker runs LLM-generated Python. Its restricted `exec()` is defence in depth, not a security boundary; the real boundary is the container (non-root, all capabilities dropped, read-only root filesystem, CPU and memory limits, no published port). Its network egress is not blocked. Rate limits, input caps and other protections are listed in [SECURITY.md](SECURITY.md), which is also where to report a vulnerability.
+The worker runs LLM-generated Python. Its restricted `exec()` is defence in depth, not a security boundary; the real boundary is the container (non-root, all capabilities dropped, read-only root filesystem, CPU, memory and process limits, no published port, no outbound network). Rate limits, input caps and other protections are listed in [SECURITY.md](SECURITY.md), which is also where to report a vulnerability.
 
 ## Running behind a proxy
 
-A local install needs none of this. On a server, put access control in front of the app, set `TRUST_PROXY` to the number of proxies that append to `X-Forwarded-For` (`1` behind nginx, Caddy or Traefik), and firewall the origin so clients cannot bypass them. Cloudflare, port binding and health checks are covered in [docs/configuration.md](docs/configuration.md#running-behind-a-proxy).
+A local install needs none of this. On a server, put access control in front of the app, set `TRUST_PROXY` to the number of proxies that append to `X-Forwarded-For` (`1` behind nginx, Caddy or Traefik), set `ALLOWED_HOSTS` to the hostname you serve it under, and firewall the origin so clients cannot bypass the proxies. Cloudflare, port binding and health checks are covered in [docs/configuration.md](docs/configuration.md#running-behind-a-proxy).
 
 ## Testing
 

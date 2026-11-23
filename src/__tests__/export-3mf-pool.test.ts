@@ -2,8 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const exportMock = vi.hoisted(() => vi.fn());
 const renderMock = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/cad-worker", () => ({ exportThreeMF: exportMock, httpStatusForWorkerFailure: () => 500 }));
-vi.mock("@/lib/cad-render", () => ({ renderCad: renderMock }));
+vi.mock("@/lib/cad-worker", () => ({ httpStatusForWorkerFailure: () => 500 }));
+vi.mock("@/lib/cad-render", () => ({ renderCad: renderMock, exportCad3mf: exportMock }));
 
 import { POST } from "@/app/api/export-3mf/route";
 import { POST as renderPOST } from "@/app/api/render-cad/route";
@@ -79,5 +79,19 @@ describe("/api/export-3mf concurrency pool", () => {
     const token = acquirePoolSlot(RENDER_POOL, 1);
     expect(token).not.toBeNull();
     releasePoolSlot(RENDER_POOL, token!);
+  });
+
+  it("passes the client's abort signal to the export, and returns the worker's own error and status", async () => {
+    exportMock.mockRejectedValueOnce(
+      Object.assign(new Error("CAD Rendering Failed: Line 2 of your script: NameError: name 'w' is not defined"), {
+        httpStatus: 400,
+      }),
+    );
+    const res = await POST(makeRequest());
+    expect(exportMock.mock.calls[0][2]).toEqual({ signal: expect.any(AbortSignal) });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "CAD Rendering Failed: Line 2 of your script: NameError: name 'w' is not defined",
+    });
   });
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { z } from "zod";
 import { withRoute } from "@/lib/api-handler";
 
@@ -63,6 +63,32 @@ describe("withRoute", () => {
       }),
     );
     expect(res.status).toBe(400);
+  });
+
+  it("answers a quiet 499, not a server fault, when the handler throws because the client disconnected", async () => {
+    const POST = withRoute(
+      { rateKey: `t-abort-${Math.random()}`, rateLimit: 5, schema },
+      async (_input, { signal }) => {
+        // What a worker call does when its signal fires (see callWorker).
+        await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+        throw Object.assign(new Error("CAD worker request aborted"), { httpStatus: 502 });
+      },
+    );
+    const client = new AbortController();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pending = POST(
+      new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-forwarded-for": "8.8.4.4" },
+        body: JSON.stringify({ code: "x" }),
+        signal: client.signal,
+      }),
+    );
+    setTimeout(() => client.abort(), 5);
+    const res = await pending;
+    expect(res.status).toBe(499);
+    expect(error).not.toHaveBeenCalled();
+    error.mockRestore();
   });
 
   it("returns 500 with sanitized message on handler throw", async () => {

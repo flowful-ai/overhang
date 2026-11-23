@@ -1440,12 +1440,32 @@ def _child_main(conn, pipeline, code: str, memory_mb: int, cpu_seconds: int) -> 
     group in a dev terminal) or SystemExit raised from library code must be
     reported as an error, not surface as a silent "crashed" (out of memory)."""
     try:
+        # Own session and process group, so the parent's kill also reaches
+        # whatever the script started (see _kill_group).
+        try:
+            os.setsid()
+        except OSError:
+            pass
         _apply_child_limits(memory_mb, cpu_seconds)
         conn.send(("ok", pipeline(code)))
     except BaseException as e:
         conn.send(("error", _error_detail(e), traceback.format_exc()))
     finally:
         conn.close()
+
+
+def _kill_group(pid: int) -> None:
+    """SIGKILL the process group a render child leads (_child_main's setsid),
+    i.e. the processes its script started that are still running: the sandbox
+    is not a boundary, so a script can reach os.fork or a shell. The group id
+    stays reserved while any member is alive; once the group is empty, hitting
+    an unrelated one would take the pid being reused by a new group leader
+    within the same instant. Not a guarantee: a process that calls setsid itself leaves the
+    group and outlives the render (see SECURITY.md)."""
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass  # no such group: the child died before setsid, or left nothing behind
 
 
 def _noop_pipeline(code: str) -> dict:
@@ -1455,7 +1475,8 @@ def _noop_pipeline(code: str) -> dict:
 def _run_in_child(pipeline, code: str, timeout_s: float) -> tuple:
     """Run `pipeline(code)` in a fresh child and wait at most `timeout_s`.
     Blocking; call it off the event loop. Always reaps the child (SIGKILL if
-    still running) before returning, so the caller's slot can be freed.
+    still running, along with the processes left in its group) before
+    returning, so the caller's slot can be freed.
 
     Returns ("ok", payload), ("error", detail, traceback), ("timeout",), or
     ("crashed", exitcode) when the child died without reporting (OOM kill,
@@ -1483,6 +1504,7 @@ def _run_in_child(pipeline, code: str, timeout_s: float) -> tuple:
         recv_conn.close()
         if proc.pid is not None:
             proc.kill()
+            _kill_group(proc.pid)
             proc.join()
             proc.close()
 
